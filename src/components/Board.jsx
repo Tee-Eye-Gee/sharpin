@@ -1,49 +1,51 @@
 import { Chessboard } from 'react-chessboard'
 
-// Board color palette
 const DARK_SQUARE  = '#2C2C2C'
 const LIGHT_SQUARE = '#4A4A4A'
-const HIGHLIGHT    = 'rgba(212, 160, 23, 0.35)'  // amber glow on last move
+const HIGHLIGHT    = 'rgba(212, 160, 23, 0.35)' // amber glow on last move
 
-export default function Board({ fen, onTiggsMoved, isTheoThinking, gameStatus, lastMove }) {
-  const isPlayable = gameStatus === 'playing' && !isTheoThinking
+const STATUS_RING = {
+  solved: 'ring-2 ring-emerald-500/70',
+  failed: 'ring-2 ring-red-500/70',
+  correct: 'ring-2 ring-[#D4A017]/70',
+}
+
+export default function Board({ fen, orientation, status, lastMove, onUserMove }) {
+  const isPlayable = status === 'solving'
 
   function handlePieceDrop(sourceSquare, targetSquare) {
     if (!isPlayable) return false
-    return onTiggsMoved(sourceSquare, targetSquare)
+    return onUserMove(sourceSquare, targetSquare)
   }
 
-  // Highlight last move squares
   const customSquareStyles = {}
   if (lastMove) {
     customSquareStyles[lastMove.from] = { backgroundColor: HIGHLIGHT }
     customSquareStyles[lastMove.to]   = { backgroundColor: HIGHLIGHT }
   }
 
+  const ringClass = STATUS_RING[status] ?? ''
+
   return (
-    <div className="relative w-full">
-      {/* Thinking overlay */}
-      {isTheoThinking && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-          <div className="bg-black/60 rounded-lg px-4 py-2 flex items-center gap-2">
-            <ThinkingDots />
-            <span className="text-[#D4A017] text-sm font-medium tracking-wide">
-              Theo is thinking
-            </span>
-          </div>
+    <div className={`relative w-full rounded-lg transition-all ${ringClass}`}>
+      {status === 'loading' && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 rounded-lg pointer-events-none">
+          <ThinkingDots />
         </div>
       )}
 
-      <Chessboard
-        position={fen}
-        onPieceDrop={handlePieceDrop}
-        boardOrientation="black"
-        arePiecesDraggable={isPlayable}
-        customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
-        customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
-        customSquareStyles={customSquareStyles}
-        animationDuration={200}
-      />
+      {fen && (
+        <Chessboard
+          position={fen}
+          onPieceDrop={handlePieceDrop}
+          boardOrientation={orientation}
+          arePiecesDraggable={isPlayable}
+          customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
+          customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
+          customSquareStyles={customSquareStyles}
+          animationDuration={200}
+        />
+      )}
     </div>
   )
 }
