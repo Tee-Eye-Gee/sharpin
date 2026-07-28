@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Puzzle data (raw CSV — too large for git)
+data/raw/
+
 # Environment variables — NEVER commit these
 .env
 .env.local
