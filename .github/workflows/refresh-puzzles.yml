@@ -1,0 +1,52 @@
+name: Refresh puzzle chunks
+
+# Monthly re-pull of the Lichess puzzle DB and rebuild of the rating-band
+# JSON chunks. Runs here (not Vercel Cron) because serverless functions have
+# a read-only/ephemeral filesystem and can't commit the rebuilt chunks back
+# to the repo — a GitHub Action with push access can.
+on:
+  schedule:
+    - cron: '0 6 1 * *' # 06:00 UTC on the 1st of every month
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install zstd
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Download latest Lichess puzzle database
+        run: |
+          mkdir -p data/raw
+          curl -sSL -o data/raw/lichess_db_puzzle.csv.zst \
+            https://database.lichess.org/lichess_db_puzzle.csv.zst
+          unzstd data/raw/lichess_db_puzzle.csv.zst -o data/raw/lichess_db_puzzle.csv
+          rm data/raw/lichess_db_puzzle.csv.zst
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild puzzle chunks
+        run: npm run build:puzzles
+
+      - name: Commit and push if chunks changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- src/data/puzzles; then
+            echo "No puzzle chunk changes — skipping commit."
+          else
+            git add src/data/puzzles
+            git commit -m "chore: monthly puzzle chunk refresh"
+            git push
+          fi
