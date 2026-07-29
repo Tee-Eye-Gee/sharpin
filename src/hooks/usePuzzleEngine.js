@@ -177,14 +177,21 @@ export function usePuzzleEngine() {
     }
   }, [])
 
-  const onUserMove = useCallback((sourceSquare, targetSquare, promotion = 'q') => {
+  const onUserMove = useCallback((sourceSquare, targetSquare, piece) => {
     if (status !== 'solving') return false
     const puzzle = puzzleRef.current
     const chess = chessRef.current
     const expectedUci = puzzle.moves[plyRef.current]
     if (!expectedUci) return false
 
-    const attemptedUci = sourceSquare + targetSquare + (expectedUci.length > 4 ? promotion : '')
+    // react-chessboard's default promotion dialog (shown whenever a pawn
+    // drops on the back rank) reports the piece the player actually chose
+    // via this `piece` arg (e.g. "wN") — read the underpromotion straight
+    // from that instead of assuming queen. Only consulted when the
+    // solution itself is a promotion; a plain move's `piece` is just the
+    // dragged piece's type and isn't a promotion signal.
+    const promotion = expectedUci.length > 4 && piece ? piece[1].toLowerCase() : ''
+    const attemptedUci = sourceSquare + targetSquare + promotion
 
     if (attemptedUci !== expectedUci) {
       finishAttempt(false)

@@ -13,9 +13,9 @@ const STATUS_RING = {
 export default function Board({ fen, orientation, status, lastMove, onUserMove }) {
   const isPlayable = status === 'solving'
 
-  function handlePieceDrop(sourceSquare, targetSquare) {
+  function handlePieceDrop(sourceSquare, targetSquare, piece) {
     if (!isPlayable) return false
-    return onUserMove(sourceSquare, targetSquare)
+    return onUserMove(sourceSquare, targetSquare, piece)
   }
 
   const customSquareStyles = {}
