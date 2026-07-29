@@ -24,7 +24,6 @@ export default function App() {
     currentThemes,
     puzzleRating,
     coachNote,
-    isCoaching,
     lastMove,
     onUserMove,
     loadNextPuzzle,
@@ -60,7 +59,7 @@ export default function App() {
             lastMove={lastMove}
             onUserMove={onUserMove}
           />
-          <CoachNote status={status} coachNote={coachNote} isCoaching={isCoaching} />
+          <CoachNote status={status} coachNote={coachNote} />
         </div>
 
         <aside className="flex flex-col gap-4 w-full md:w-64 lg:w-72 flex-shrink-0 mt-4 md:mt-0">

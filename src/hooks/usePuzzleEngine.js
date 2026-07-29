@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { Chess } from 'chess.js'
 import { nearestBands, bandForRating, updateRating } from '../utils/rating'
-import { getProfile, recordAttempt, getRecentAttempts, getWeakThemes } from '../utils/storage'
+import { getProfile, recordAttempt, getRecentAttempts, getAllAttempts } from '../utils/storage'
+import { generateCoachNote } from '../utils/coach'
 
 // Vite code-splits each of these into its own lazily-fetched, content-hashed
 // chunk — only the rating band(s) actually needed get downloaded, and the
@@ -49,7 +50,6 @@ export function usePuzzleEngine() {
   const puzzleRef = useRef(null)
   const plyRef = useRef(0)
   const startTimeRef = useRef(null)
-  const sanHistoryRef = useRef([])
 
   const [fen, setFen] = useState(null)
   const [orientation, setOrientation] = useState('white')
@@ -60,7 +60,6 @@ export function usePuzzleEngine() {
   const [currentThemes, setCurrentThemes] = useState([])
   const [puzzleRating, setPuzzleRating] = useState(null)
   const [coachNote, setCoachNote] = useState('')
-  const [isCoaching, setIsCoaching] = useState(false)
   const [lastMove, setLastMove] = useState(null)
 
   const advanceOpponentMove = useCallback(() => {
@@ -73,7 +72,6 @@ export function usePuzzleEngine() {
     if (result) {
       setFen(chess.fen())
       setLastMove({ from: result.from, to: result.to })
-      sanHistoryRef.current.push(result.san)
     }
   }, [])
 
@@ -111,7 +109,6 @@ export function usePuzzleEngine() {
     const chess = new Chess(chosen.fen)
     chessRef.current = chess
     puzzleRef.current = chosen
-    sanHistoryRef.current = []
     setLastMove(null)
 
     // The stored FEN is the position before the opponent's setup move
@@ -152,29 +149,10 @@ export function usePuzzleEngine() {
     setStreak(updatedProfile.currentStreak)
     setStatus(solved ? 'solved' : 'failed')
 
-    setIsCoaching(true)
-    try {
-      const weakThemes = await getWeakThemes()
-      const res = await fetch('/api/coach', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          themes: puzzle.themes,
-          solved,
-          movesPlayed: sanHistoryRef.current,
-          timeTakenMs,
-          weakThemes,
-        }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setCoachNote(data.note ?? '')
-      }
-    } catch {
-      // Coaching commentary is best-effort — a proxy hiccup shouldn't block the trainer.
-    } finally {
-      setIsCoaching(false)
-    }
+    // Rule-based, fully local — no network call, no API key. Reads the
+    // attempt log this same recordAttempt() call just wrote to.
+    const attempts = await getAllAttempts()
+    setCoachNote(generateCoachNote({ themes: puzzle.themes, solved, profile: updatedProfile, attempts }))
   }, [])
 
   const onUserMove = useCallback((sourceSquare, targetSquare, piece) => {
@@ -204,7 +182,6 @@ export function usePuzzleEngine() {
     plyRef.current += 1
     setFen(chess.fen())
     setLastMove({ from: result.from, to: result.to })
-    sanHistoryRef.current.push(result.san)
 
     if (plyRef.current >= puzzle.moves.length) {
       finishAttempt(true)
@@ -236,7 +213,6 @@ export function usePuzzleEngine() {
     currentThemes,
     puzzleRating,
     coachNote,
-    isCoaching,
     lastMove,
     onUserMove,
     loadNextPuzzle: loadPuzzle,

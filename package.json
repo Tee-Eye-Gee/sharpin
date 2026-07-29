@@ -10,7 +10,6 @@
     "build:puzzles": "node scripts/build-puzzle-chunks.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
     "chess.js": "^1.0.0",
     "react": "^18.3.0",
     "react-chessboard": "^4.7.0",

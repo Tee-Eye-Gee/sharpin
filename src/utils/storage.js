@@ -126,6 +126,18 @@ export async function getRecentAttempts(limit = 15) {
   return all.slice(-limit).reverse()
 }
 
+/**
+ * The full attempt history, newest first — used by the rule-based coach to
+ * find each theme's most recent occurrences regardless of how far back they
+ * fall (a rare theme's last 10 attempts may be older than any fixed window).
+ */
+export async function getAllAttempts() {
+  const db = await openDB()
+  const t = tx(db, [STORE_ATTEMPTS], 'readonly')
+  const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
+  return all.slice().reverse()
+}
+
 async function appendAttempt(db, attempt) {
   const t = tx(db, [STORE_ATTEMPTS], 'readwrite')
   t.objectStore(STORE_ATTEMPTS).add(attempt)

@@ -1,21 +1,4 @@
-const THEME_LABELS = {
-  mateIn1: 'Mate in 1',
-  mateIn2: 'Mate in 2',
-  mateIn3: 'Mate in 3',
-  hangingPiece: 'Hanging piece',
-  crushing: 'Crushing',
-  advantage: 'Advantage',
-  fork: 'Fork',
-  pin: 'Pin',
-  skewer: 'Skewer',
-  endgame: 'Endgame',
-  middlegame: 'Middlegame',
-  opening: 'Opening',
-}
-
-function formatTheme(theme) {
-  return THEME_LABELS[theme] ?? theme.replace(/([a-z])([A-Z])/g, '$1 $2')
-}
+import { formatTheme } from '../utils/themeLabels'
 
 export default function PuzzleControls({
   status,
