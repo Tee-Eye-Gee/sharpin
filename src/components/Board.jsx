@@ -1,17 +1,16 @@
 import { Chessboard } from 'react-chessboard'
-
-const DARK_SQUARE  = '#2C2C2C'
-const LIGHT_SQUARE = '#4A4A4A'
-const HIGHLIGHT    = 'rgba(212, 160, 23, 0.35)' // amber glow on last move
+import { BOARD_THEMES, DEFAULT_BOARD_THEME, accentRgba } from '../utils/theme'
 
 const STATUS_RING = {
   solved: 'ring-2 ring-emerald-500/70',
   failed: 'ring-2 ring-red-500/70',
-  correct: 'ring-2 ring-[#D4A017]/70',
+  correct: 'ring-2 ring-accent/70',
 }
 
-export default function Board({ fen, orientation, status, lastMove, onUserMove }) {
+export default function Board({ fen, orientation, status, lastMove, onUserMove, boardTheme, appMode }) {
   const isPlayable = status === 'solving'
+  const { light: lightSquare, dark: darkSquare } = BOARD_THEMES[boardTheme] ?? BOARD_THEMES[DEFAULT_BOARD_THEME]
+  const highlight = accentRgba(appMode, 0.35) // accent glow on last move
 
   function handlePieceDrop(sourceSquare, targetSquare, piece) {
     if (!isPlayable) return false
@@ -20,8 +19,8 @@ export default function Board({ fen, orientation, status, lastMove, onUserMove }
 
   const customSquareStyles = {}
   if (lastMove) {
-    customSquareStyles[lastMove.from] = { backgroundColor: HIGHLIGHT }
-    customSquareStyles[lastMove.to]   = { backgroundColor: HIGHLIGHT }
+    customSquareStyles[lastMove.from] = { backgroundColor: highlight }
+    customSquareStyles[lastMove.to]   = { backgroundColor: highlight }
   }
 
   const ringClass = STATUS_RING[status] ?? ''
@@ -40,8 +39,8 @@ export default function Board({ fen, orientation, status, lastMove, onUserMove }
           onPieceDrop={handlePieceDrop}
           boardOrientation={orientation}
           arePiecesDraggable={isPlayable}
-          customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
-          customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
+          customDarkSquareStyle={{ backgroundColor: darkSquare }}
+          customLightSquareStyle={{ backgroundColor: lightSquare }}
           customSquareStyles={customSquareStyles}
           animationDuration={200}
         />
@@ -56,7 +55,7 @@ function ThinkingDots() {
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className="w-1.5 h-1.5 rounded-full bg-[#D4A017] animate-bounce"
+          className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce"
           style={{ animationDelay: `${i * 0.15}s` }}
         />
       ))}

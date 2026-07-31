@@ -1,7 +1,12 @@
+import { useState, useEffect, useCallback } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import Board           from './components/Board'
-import PuzzleControls  from './components/PuzzleControls'
-import ProgressPanel   from './components/ProgressPanel'
+import { getPreferences, savePreferences } from './utils/storage'
+import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
+import Header          from './components/Header'
+import SettingsPanel    from './components/SettingsPanel'
+import Board            from './components/Board'
+import PuzzleControls   from './components/PuzzleControls'
+import ProgressPanel    from './components/ProgressPanel'
 import CoachNote        from './components/CoachNote'
 
 const HEADLINES = {
@@ -30,40 +35,87 @@ export default function App() {
     giveUp,
   } = usePuzzleEngine()
 
+  const [appMode, setAppMode] = useState('dark')
+  const [boardTheme, setBoardTheme] = useState(DEFAULT_BOARD_THEME)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  // On first mount: load persisted preferences. If app mode has never been
+  // set, detect it from the OS once and persist that as the permanent
+  // choice — subsequent visits must not re-detect (spec §3).
+  useEffect(() => {
+    let cancelled = false
+    getPreferences().then(async (prefs) => {
+      if (cancelled) return
+      let mode = prefs.appMode
+      if (mode === null) {
+        mode = detectSystemAppMode()
+        await savePreferences({ ...prefs, appMode: mode })
+      }
+      setAppMode(mode)
+      setBoardTheme(prefs.boardTheme)
+      applyTheme(mode, prefs.boardTheme)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const toggleAppMode = useCallback(() => {
+    setAppMode((prev) => {
+      const next = prev === 'dark' ? 'light' : 'dark'
+      applyTheme(next, boardTheme)
+      getPreferences().then((prefs) => savePreferences({ ...prefs, appMode: next }))
+      return next
+    })
+  }, [boardTheme])
+
+  const selectBoardTheme = useCallback((themeId) => {
+    setBoardTheme(themeId)
+    applyTheme(appMode, themeId)
+    getPreferences().then((prefs) => savePreferences({ ...prefs, boardTheme: themeId }))
+  }, [appMode])
+
   return (
-    <div className="min-h-screen bg-[#0f0f0f] text-neutral-200 flex flex-col">
+    <div className="min-h-screen bg-bg text-fg flex flex-col">
 
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#1e1e1e]">
-        <div>
-          <h1 className="text-lg font-bold tracking-tight">
-            <span className="text-[#D4A017]">Sharp</span>
-            <span>in</span>
-          </h1>
-          <p className="text-xs text-neutral-600">
-            {orientation === 'white' ? 'You are White' : 'You are Black'}
-          </p>
-        </div>
+      <Header
+        appMode={appMode}
+        onToggleMode={toggleAppMode}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
-        <div className="text-xs font-medium px-2.5 py-1 rounded-full bg-[#1a1a1a] text-neutral-500 border border-[#2a2a2a]">
-          {HEADLINES[status] ?? ''}
-        </div>
-      </header>
+      {settingsOpen && (
+        <SettingsPanel
+          boardTheme={boardTheme}
+          onSelectBoardTheme={selectBoardTheme}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       <main className="flex-1 flex flex-col md:flex-row gap-0 md:gap-4 p-4 md:p-6 max-w-5xl mx-auto w-full">
 
         <div className="flex flex-col gap-3 w-full md:max-w-[520px]">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-fg-muted">
+              {orientation === 'white' ? 'You are White' : 'You are Black'}
+            </p>
+            <div className="text-xs font-medium px-2.5 py-1 rounded-full bg-surface text-fg-muted border border-border">
+              {HEADLINES[status] ?? ''}
+            </div>
+          </div>
+
           <Board
             fen={fen}
             orientation={orientation}
             status={status}
             lastMove={lastMove}
             onUserMove={onUserMove}
+            boardTheme={boardTheme}
+            appMode={appMode}
           />
           <CoachNote status={status} coachNote={coachNote} />
         </div>
 
         <aside className="flex flex-col gap-4 w-full md:w-64 lg:w-72 flex-shrink-0 mt-4 md:mt-0">
-          <div className="bg-[#141414] border border-[#1e1e1e] rounded-lg p-4">
+          <div className="bg-surface border border-border rounded-lg p-4">
             <PuzzleControls
               status={status}
               puzzleRating={puzzleRating}
@@ -73,7 +125,7 @@ export default function App() {
             />
           </div>
 
-          <div className="bg-[#141414] border border-[#1e1e1e] rounded-lg p-4">
+          <div className="bg-surface border border-border rounded-lg p-4">
             <ProgressPanel
               userRating={userRating}
               lastDelta={lastDelta}
