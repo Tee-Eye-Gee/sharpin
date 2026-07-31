@@ -4,7 +4,7 @@ export default function CoachNote({ status, coachNote }) {
 
   return (
     <div className="px-1 min-h-[1.5rem]">
-      <span className="text-sm text-neutral-400 italic">"{coachNote}"</span>
+      <span className="text-sm text-fg-muted italic">"{coachNote}"</span>
     </div>
   )
 }

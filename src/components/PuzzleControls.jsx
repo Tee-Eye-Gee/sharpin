@@ -13,19 +13,19 @@ export default function PuzzleControls({
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-xs text-neutral-600 uppercase tracking-widest font-medium mb-2">
+        <h2 className="text-xs text-fg-muted uppercase tracking-widest font-medium mb-2">
           This puzzle
         </h2>
         <div className="flex flex-wrap gap-1.5">
           {puzzleRating && (
-            <span className="text-xs font-mono px-2 py-1 rounded-full bg-[#1a1a1a] border border-[#2a2a2a] text-neutral-400">
+            <span className="text-xs font-mono px-2 py-1 rounded-full bg-surface border border-border-strong text-fg-muted">
               {puzzleRating}
             </span>
           )}
           {currentThemes.slice(0, 4).map((theme) => (
             <span
               key={theme}
-              className="text-xs px-2 py-1 rounded-full bg-[#1a1400] border border-[#D4A017]/30 text-[#D4A017]"
+              className="text-xs px-2 py-1 rounded-full bg-accent/10 border border-accent/30 text-accent"
             >
               {formatTheme(theme)}
             </span>
@@ -37,7 +37,7 @@ export default function PuzzleControls({
         <button
           onClick={onNextPuzzle}
           className="w-full rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
-                     bg-[#D4A017] text-black hover:bg-[#e8b520] active:scale-95"
+                     bg-accent text-black hover:brightness-110 active:scale-95"
         >
           Next Puzzle
         </button>
@@ -45,8 +45,8 @@ export default function PuzzleControls({
         <button
           onClick={onGiveUp}
           disabled={!isActive}
-          className="w-full rounded-lg py-2 text-sm font-medium text-neutral-500
-                     border border-[#2a2a2a] hover:border-red-900 hover:text-red-400
+          className="w-full rounded-lg py-2 text-sm font-medium text-fg-muted
+                     border border-border-strong hover:border-red-900 hover:text-red-400
                      transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
         >
           Give Up

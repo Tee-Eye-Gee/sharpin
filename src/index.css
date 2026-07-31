@@ -2,6 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Fallback paint before src/utils/theme.js runs on mount (dark + Tournament
+   board, matching the app's pre-detection defaults). theme.js overwrites
+   these same custom properties once the persisted/detected preference
+   loads, so this only governs the very first paint. */
+:root {
+  --color-bg: 15 15 15;
+  --color-surface: 20 20 20;
+  --color-border: 30 30 30;
+  --color-border-strong: 42 42 42;
+  --color-fg: 245 245 245;
+  --color-fg-muted: 176 176 176;
+  --color-accent: 232 185 35;
+  --board-light: 238 238 210;
+  --board-dark: 118 150 86;
+}
+
 * {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -14,8 +30,8 @@ html, body, #root {
 
 body {
   margin: 0;
-  background-color: #0f0f0f;
-  color: #e5e5e5;
+  background-color: rgb(var(--color-bg));
+  color: rgb(var(--color-fg));
   font-family: 'Inter', system-ui, sans-serif;
 }
 
@@ -24,12 +40,12 @@ body {
   width: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: rgb(var(--color-surface));
 }
 ::-webkit-scrollbar-thumb {
-  background: #3a3a3a;
+  background: rgb(var(--color-border-strong));
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #D4A017;
+  background: rgb(var(--color-accent));
 }

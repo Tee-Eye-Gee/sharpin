@@ -1,11 +1,13 @@
 import { DEFAULT_RATING } from './rating'
 
 const DB_NAME = 'sharpin'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE_PROFILE = 'profile'
 const STORE_ATTEMPTS = 'attempts'
 const STORE_THEME_STATS = 'themeStats'
+const STORE_PREFERENCES = 'preferences'
 const PROFILE_KEY = 'main'
+const PREFERENCES_KEY = 'main'
 
 let dbPromise = null
 
@@ -23,6 +25,9 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains(STORE_THEME_STATS)) {
         db.createObjectStore(STORE_THEME_STATS)
+      }
+      if (!db.objectStoreNames.contains(STORE_PREFERENCES)) {
+        db.createObjectStore(STORE_PREFERENCES)
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -65,6 +70,32 @@ async function saveProfile(profile) {
   const db = await openDB()
   const t = tx(db, [STORE_PROFILE], 'readwrite')
   t.objectStore(STORE_PROFILE).put(profile, PROFILE_KEY)
+  return new Promise((resolve, reject) => {
+    t.oncomplete = () => resolve()
+    t.onerror = () => reject(t.error)
+  })
+}
+
+const DEFAULT_PREFERENCES = {
+  appMode: null, // null until first OS-detection; then persisted and never re-detected
+  boardTheme: 'tournament',
+}
+
+/**
+ * Load the user's app-mode/board-theme preferences, creating the default
+ * (undetected appMode, tournament board) if this is a first run.
+ */
+export async function getPreferences() {
+  const db = await openDB()
+  const t = tx(db, [STORE_PREFERENCES], 'readonly')
+  const result = await reqToPromise(t.objectStore(STORE_PREFERENCES).get(PREFERENCES_KEY))
+  return result ?? { ...DEFAULT_PREFERENCES }
+}
+
+export async function savePreferences(preferences) {
+  const db = await openDB()
+  const t = tx(db, [STORE_PREFERENCES], 'readwrite')
+  t.objectStore(STORE_PREFERENCES).put(preferences, PREFERENCES_KEY)
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)

@@ -15,11 +15,11 @@ export default function ProgressPanel({ userRating, lastDelta, streak, refreshKe
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-xs text-neutral-600 uppercase tracking-widest font-medium mb-2">
+        <h2 className="text-xs text-fg-muted uppercase tracking-widest font-medium mb-2">
           Rating
         </h2>
         <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-bold text-[#D4A017] font-mono tabular-nums">
+          <span className="text-2xl font-bold text-accent font-mono tabular-nums">
             {userRating ?? '—'}
           </span>
           {lastDelta !== 0 && (
@@ -32,23 +32,23 @@ export default function ProgressPanel({ userRating, lastDelta, streak, refreshKe
 
       {streak > 0 && (
         <div>
-          <h2 className="text-xs text-neutral-600 uppercase tracking-widest font-medium mb-1">
+          <h2 className="text-xs text-fg-muted uppercase tracking-widest font-medium mb-1">
             Streak
           </h2>
-          <span className="text-sm text-neutral-300 font-medium">{streak} in a row</span>
+          <span className="text-sm text-fg font-medium">{streak} in a row</span>
         </div>
       )}
 
       {weakThemes.length > 0 && (
         <div>
-          <h2 className="text-xs text-neutral-600 uppercase tracking-widest font-medium mb-2">
+          <h2 className="text-xs text-fg-muted uppercase tracking-widest font-medium mb-2">
             Needs work
           </h2>
           <ul className="flex flex-col gap-1.5">
             {weakThemes.map(({ theme, accuracy, attempts }) => (
               <li key={theme} className="flex items-center justify-between text-sm">
-                <span className="text-neutral-400">{theme}</span>
-                <span className="text-neutral-600 font-mono text-xs">
+                <span className="text-fg-muted">{theme}</span>
+                <span className="text-fg-muted font-mono text-xs">
                   {Math.round(accuracy * 100)}% ({attempts})
                 </span>
               </li>
