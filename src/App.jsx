@@ -37,6 +37,7 @@ export default function App() {
 
   const [appMode, setAppMode] = useState('dark')
   const [boardTheme, setBoardTheme] = useState(DEFAULT_BOARD_THEME)
+  const [inputMode, setInputMode] = useState('drag')
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   // On first mount: load persisted preferences. If app mode has never been
@@ -53,6 +54,7 @@ export default function App() {
       }
       setAppMode(mode)
       setBoardTheme(prefs.boardTheme)
+      setInputMode(prefs.inputMode)
       applyTheme(mode, prefs.boardTheme)
     })
     return () => { cancelled = true }
@@ -73,6 +75,11 @@ export default function App() {
     getPreferences().then((prefs) => savePreferences({ ...prefs, boardTheme: themeId }))
   }, [appMode])
 
+  const selectInputMode = useCallback((mode) => {
+    setInputMode(mode)
+    getPreferences().then((prefs) => savePreferences({ ...prefs, inputMode: mode }))
+  }, [])
+
   return (
     <div className="min-h-screen bg-bg text-fg flex flex-col">
 
@@ -86,6 +93,8 @@ export default function App() {
         <SettingsPanel
           boardTheme={boardTheme}
           onSelectBoardTheme={selectBoardTheme}
+          inputMode={inputMode}
+          onSelectInputMode={selectInputMode}
           onClose={() => setSettingsOpen(false)}
         />
       )}

@@ -79,17 +79,21 @@ async function saveProfile(profile) {
 const DEFAULT_PREFERENCES = {
   appMode: null, // null until first OS-detection; then persisted and never re-detected
   boardTheme: 'tournament',
+  inputMode: 'drag', // preserves current behavior for existing users until they opt into tap
 }
 
 /**
- * Load the user's app-mode/board-theme preferences, creating the default
- * (undetected appMode, tournament board) if this is a first run.
+ * Load the user's app-mode/board-theme/input-mode preferences, creating the
+ * defaults if this is a first run. Merges over DEFAULT_PREFERENCES rather
+ * than returning a stored record as-is, so a key added after a user's first
+ * visit (e.g. inputMode) still resolves to its default on their existing,
+ * older-shaped record instead of coming back undefined.
  */
 export async function getPreferences() {
   const db = await openDB()
   const t = tx(db, [STORE_PREFERENCES], 'readonly')
   const result = await reqToPromise(t.objectStore(STORE_PREFERENCES).get(PREFERENCES_KEY))
-  return result ?? { ...DEFAULT_PREFERENCES }
+  return { ...DEFAULT_PREFERENCES, ...result }
 }
 
 export async function savePreferences(preferences) {
