@@ -119,6 +119,7 @@ export default function App() {
             onUserMove={onUserMove}
             boardTheme={boardTheme}
             appMode={appMode}
+            inputMode={inputMode}
           />
           <CoachNote status={status} coachNote={coachNote} />
         </div>
