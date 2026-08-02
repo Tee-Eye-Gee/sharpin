@@ -50,6 +50,10 @@ export function usePuzzleEngine() {
   const puzzleRef = useRef(null)
   const plyRef = useRef(0)
   const startTimeRef = useRef(null)
+  // Sole commit guard: true once finishAttempt has written for this puzzle
+  // instance. Reset only in loadPuzzle, so no path (wrong move, give up, or
+  // a post-retry move) can ever produce a second write for the same puzzle.
+  const attemptCommittedRef = useRef(false)
 
   const [fen, setFen] = useState(null)
   const [orientation, setOrientation] = useState('white')
@@ -61,6 +65,11 @@ export function usePuzzleEngine() {
   const [puzzleRating, setPuzzleRating] = useState(null)
   const [coachNote, setCoachNote] = useState('')
   const [lastMove, setLastMove] = useState(null)
+  // Plain UI-state flag — not a counter. True from the moment the user first
+  // clicks Retry until the next loadPuzzle. Lets the board go interactive
+  // again post-fail without re-arming the commit path (finishAttempt is
+  // gated separately, above) or resurrecting the Give Up affordance.
+  const [isRetrying, setIsRetrying] = useState(false)
 
   const advanceOpponentMove = useCallback(() => {
     const puzzle = puzzleRef.current
@@ -109,6 +118,8 @@ export function usePuzzleEngine() {
     const chess = new Chess(chosen.fen)
     chessRef.current = chess
     puzzleRef.current = chosen
+    attemptCommittedRef.current = false
+    setIsRetrying(false)
     setLastMove(null)
 
     // The stored FEN is the position before the opponent's setup move
@@ -130,6 +141,12 @@ export function usePuzzleEngine() {
   }, [])
 
   const finishAttempt = useCallback(async (solved) => {
+    // Synchronous, pre-await: closes off the same-tick re-entrancy window
+    // (see usePuzzleEngine.js commit-guard note) as well as any post-retry
+    // call — this is the single point every commit path must clear.
+    if (attemptCommittedRef.current) return
+    attemptCommittedRef.current = true
+
     const puzzle = puzzleRef.current
     const profile = await getProfile()
     const { newRating, delta } = updateRating(profile.rating, puzzle.rating, solved)
@@ -172,7 +189,13 @@ export function usePuzzleEngine() {
     const attemptedUci = sourceSquare + targetSquare + promotion
 
     if (attemptedUci !== expectedUci) {
-      finishAttempt(false)
+      if (isRetrying) {
+        // Outcome already fixed at the original fail — reuse the same
+        // "Not Quite" UI (status-driven ring/headline/CoachNote), no write.
+        setStatus('failed')
+      } else {
+        finishAttempt(false)
+      }
       return false
     }
 
@@ -184,7 +207,13 @@ export function usePuzzleEngine() {
     setLastMove({ from: result.from, to: result.to })
 
     if (plyRef.current >= puzzle.moves.length) {
-      finishAttempt(true)
+      if (isRetrying) {
+        // Practice solve after an already-committed fail — board shows the
+        // solved state for the user's benefit, but no write.
+        setStatus('solved')
+      } else {
+        finishAttempt(true)
+      }
       return true
     }
 
@@ -194,12 +223,35 @@ export function usePuzzleEngine() {
       setStatus('solving')
     }, 400)
     return true
-  }, [status, finishAttempt, advanceOpponentMove])
+  }, [status, isRetrying, finishAttempt, advanceOpponentMove])
 
   const giveUp = useCallback(() => {
     if (status !== 'solving' && status !== 'correct') return
     finishAttempt(false)
   }, [status, finishAttempt])
+
+  // Purely presentational: puts the board back at the puzzle's start
+  // position (same derivation as loadPuzzle's setup-move handling) so the
+  // user can attempt again. The outcome was already fixed at the original
+  // fail-commit, so this never touches storage.
+  const retryPuzzle = useCallback(() => {
+    const puzzle = puzzleRef.current
+    if (!puzzle || status !== 'failed') return
+
+    const chess = new Chess(puzzle.fen)
+    chessRef.current = chess
+    plyRef.current = 0
+    const setupUci = puzzle.moves[0]
+    if (setupUci) {
+      chess.move(uciToMove(setupUci))
+      plyRef.current = 1
+    }
+
+    setLastMove(null)
+    setFen(chess.fen())
+    setIsRetrying(true)
+    setStatus('solving')
+  }, [status])
 
   useEffect(() => { loadPuzzle() }, [loadPuzzle])
 
@@ -214,8 +266,10 @@ export function usePuzzleEngine() {
     puzzleRating,
     coachNote,
     lastMove,
+    isRetrying,
     onUserMove,
     loadNextPuzzle: loadPuzzle,
     giveUp,
+    retryPuzzle,
   }
 }

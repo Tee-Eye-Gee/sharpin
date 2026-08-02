@@ -30,9 +30,11 @@ export default function App() {
     puzzleRating,
     coachNote,
     lastMove,
+    isRetrying,
     onUserMove,
     loadNextPuzzle,
     giveUp,
+    retryPuzzle,
   } = usePuzzleEngine()
 
   const [appMode, setAppMode] = useState('dark')
@@ -130,8 +132,10 @@ export default function App() {
               status={status}
               puzzleRating={puzzleRating}
               currentThemes={currentThemes}
+              isRetrying={isRetrying}
               onNextPuzzle={loadNextPuzzle}
               onGiveUp={giveUp}
+              onRetry={retryPuzzle}
             />
           </div>
 
