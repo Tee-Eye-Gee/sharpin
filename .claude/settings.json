@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(vercel dev*)",
+      "Bash(npm run dev*)",
+      "Bash(npm run build*)",
+      "Bash(node scripts/build-puzzle-chunks.js*)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Read(./data/raw/**)"
+    ]
+  }
+}
