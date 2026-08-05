@@ -1,6 +1,11 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { formatTheme } from '../utils/themeLabels'
 import { THEME_DEFINITIONS } from '../utils/tacticalLexicon'
+
+// Matches the popover's own max-width cap below -- used to compute a
+// viewport-safe horizontal offset before the popover ever paints.
+const POPOVER_MAX_WIDTH = 280
+const VIEWPORT_MARGIN = 12
 
 export default function PuzzleControls({
   status,
@@ -26,7 +31,9 @@ export default function PuzzleControls({
   // in the codebase, so this is a minimal, self-contained implementation
   // rather than a new generic component.
   const [openTheme, setOpenTheme] = useState(null) // raw theme id, or null
+  const [popoverOffset, setPopoverOffset] = useState(0) // px, relative to the chip's own left edge
   const chipsRef = useRef(null)
+  const activeChipRef = useRef(null) // set only on the currently-open chip's wrapper
 
   useEffect(() => {
     if (!openTheme) return
@@ -39,6 +46,18 @@ export default function PuzzleControls({
       document.removeEventListener('mousedown', handleOutsideTap)
       document.removeEventListener('touchstart', handleOutsideTap)
     }
+  }, [openTheme])
+
+  // Keep the popover inside the viewport horizontally. Runs before paint, so
+  // there's no flash at the wrong position -- computed from the known
+  // max-width cap rather than a measure-then-flip pass.
+  useLayoutEffect(() => {
+    if (!openTheme || !activeChipRef.current) { setPopoverOffset(0); return }
+    const chipRect = activeChipRef.current.getBoundingClientRect()
+    const maxLeft = window.innerWidth - VIEWPORT_MARGIN - POPOVER_MAX_WIDTH
+    const minLeft = VIEWPORT_MARGIN
+    const desiredLeft = Math.min(Math.max(chipRect.left, minLeft), Math.max(maxLeft, minLeft))
+    setPopoverOffset(desiredLeft - chipRect.left)
   }, [openTheme])
 
   return (
@@ -54,7 +73,7 @@ export default function PuzzleControls({
             </span>
           )}
           {currentThemes.slice(0, 4).map((theme) => (
-            <span key={theme} className="relative">
+            <span key={theme} className="relative" ref={openTheme === theme ? activeChipRef : null}>
               <button
                 type="button"
                 onClick={() => setOpenTheme((prev) => (prev === theme ? null : theme))}
@@ -63,7 +82,10 @@ export default function PuzzleControls({
                 {formatTheme(theme)}
               </button>
               {openTheme === theme && (
-                <div className="absolute z-30 top-full left-0 mt-1.5 w-56 max-w-[70vw] rounded-lg border border-border bg-surface p-3 shadow-xl">
+                <div
+                  className="absolute z-30 top-full mt-1.5 rounded-lg border border-border bg-surface p-3 shadow-xl"
+                  style={{ left: `${popoverOffset}px`, maxWidth: `min(${POPOVER_MAX_WIDTH}px, calc(100vw - ${VIEWPORT_MARGIN * 2}px))` }}
+                >
                   <p className="text-xs font-semibold text-fg mb-1">{formatTheme(theme)}</p>
                   {/* Many real Lichess theme tags (length/rating tags like "short",
                       "long", "master", "oneMove") have no lexicon entry -- fall
