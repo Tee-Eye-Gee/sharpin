@@ -125,9 +125,12 @@ export default function Board({ fen, orientation, status, lastMove, onUserMove, 
     customSquareStyles[selection.square] = { backgroundColor: highlight }
     for (const [square, info] of legalDestinations) {
       const base = isLightSquare(square) ? lightSquare : darkSquare
+      // A dark outline (behind the colored shape) makes these readable on
+      // dark squares too, where the indicator color's own contrast is weak —
+      // visibility comes from the edge, not from color-vs-square contrast.
       customSquareStyles[square] = info.isCapture
-        ? { backgroundColor: base, boxShadow: `inset 0 0 0 4px ${moveIndicatorRgba(appMode, 0.55)}` }
-        : { backgroundColor: base, backgroundImage: `radial-gradient(circle, ${moveIndicatorRgba(appMode, 0.45)} 22%, transparent 24%)` }
+        ? { backgroundColor: base, boxShadow: `inset 0 0 0 4px ${moveIndicatorRgba(appMode, 0.55)}, inset 0 0 0 5px rgba(0, 0, 0, 0.35)` }
+        : { backgroundColor: base, backgroundImage: `radial-gradient(circle, ${moveIndicatorRgba(appMode, 0.45)} 22%, transparent 24%), radial-gradient(circle, rgba(0, 0, 0, 0.35) 24%, transparent 26%)` }
     }
   }
 
