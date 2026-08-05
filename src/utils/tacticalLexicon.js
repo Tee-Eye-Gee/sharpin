@@ -1,9 +1,8 @@
 // Plain-English definitions for Lichess puzzle theme tags, keyed by the raw
 // theme id (same casing as themeLabels.js) so callers can look up straight
 // from currentThemes without any reverse-mapping from the formatted display
-// text. Not every theme Lichess emits has an entry here (e.g. length/rating
-// tags like "short", "long", "master", "oneMove" aren't tactical motifs) --
-// callers should have a fallback for a missing key, not treat it as unreachable.
+// text. Not every theme Lichess emits has an entry here -- callers should
+// have a fallback for a missing key, not treat it as unreachable.
 export const THEME_DEFINITIONS = {
   advancedPawn: "A pawn that's pushed deep into enemy territory, close enough to threaten promotion.",
   advantage: "A move that swings the position solidly in your favor, though not a total knockout.",
@@ -60,4 +59,13 @@ export const THEME_DEFINITIONS = {
   underPromotion: "Promoting to a knight, bishop, or rook instead of a queen — and it's the right call.",
   xRayAttack: "A piece attacks or defends a square right through an enemy piece standing in the way.",
   zugzwang: "The opponent has to move, but every option makes their position worse.",
+  long: "Three moves to win — takes a bit more digging than the short ones.",
+  master: "This puzzle comes from a real game played by a titled, master-level player.",
+  masterVsMaster: "This puzzle comes from a real game between two titled players.",
+  mix: "A mixed bag — no specific pattern here, just stay ready for anything.",
+  oneMove: "Solved in a single move.",
+  playerGames: "Pulled from a specific player's own real games, not the general puzzle pool.",
+  short: "Two moves to win — a quick, tight solution.",
+  superGM: "This puzzle comes from a real game played by one of the world's top players.",
+  veryLong: "Four moves or more to win — settle in and calculate deep.",
 }

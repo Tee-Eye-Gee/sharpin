@@ -87,9 +87,8 @@ export default function PuzzleControls({
                   style={{ left: `${popoverOffset}px`, maxWidth: `min(${POPOVER_MAX_WIDTH}px, calc(100vw - ${VIEWPORT_MARGIN * 2}px))` }}
                 >
                   <p className="text-xs font-semibold text-fg mb-1">{formatTheme(theme)}</p>
-                  {/* Many real Lichess theme tags (length/rating tags like "short",
-                      "long", "master", "oneMove") have no lexicon entry -- fall
-                      back to a plain message rather than showing nothing. */}
+                  {/* Some Lichess theme tags have no lexicon entry -- fall back
+                      to a plain message rather than showing nothing. */}
                   <p className="text-xs text-fg-muted leading-relaxed">
                     {THEME_DEFINITIONS[theme] ?? 'No definition available yet for this tag.'}
                   </p>
