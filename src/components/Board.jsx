@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
-import { BOARD_THEMES, DEFAULT_BOARD_THEME, accentRgba } from '../utils/theme'
+import { BOARD_THEMES, DEFAULT_BOARD_THEME, accentRgba, moveIndicatorRgba } from '../utils/theme'
 
 const STATUS_RING = {
   solved: 'ring-2 ring-emerald-500/70',
@@ -126,8 +126,8 @@ export default function Board({ fen, orientation, status, lastMove, onUserMove, 
     for (const [square, info] of legalDestinations) {
       const base = isLightSquare(square) ? lightSquare : darkSquare
       customSquareStyles[square] = info.isCapture
-        ? { backgroundColor: base, boxShadow: `inset 0 0 0 4px ${accentRgba(appMode, 0.55)}` }
-        : { backgroundColor: base, backgroundImage: `radial-gradient(circle, ${accentRgba(appMode, 0.45)} 22%, transparent 24%)` }
+        ? { backgroundColor: base, boxShadow: `inset 0 0 0 4px ${moveIndicatorRgba(appMode, 0.55)}` }
+        : { backgroundColor: base, backgroundImage: `radial-gradient(circle, ${moveIndicatorRgba(appMode, 0.45)} 22%, transparent 24%)` }
     }
   }
 

@@ -26,6 +26,7 @@ const APP_MODE_TOKENS = {
     fg: '245 245 245',
     fgMuted: '176 176 176',
     accent: '232 185 35',
+    moveIndicator: '197 157 30',
   },
   light: {
     bg: '250 250 250',
@@ -35,6 +36,7 @@ const APP_MODE_TOKENS = {
     fg: '26 26 26',
     fgMuted: '74 74 74',
     accent: '184 134 11',
+    moveIndicator: '156 114 9',
   },
 }
 
@@ -59,6 +61,17 @@ function toKebabCase(key) {
 export function accentRgba(appMode, alpha = 1) {
   const tokens = APP_MODE_TOKENS[appMode] ?? APP_MODE_TOKENS.dark
   return `rgba(${tokens.accent.replace(/ /g, ', ')}, ${alpha})`
+}
+
+/**
+ * The current mode's move-indicator color as an rgba() string, for the
+ * click-to-move legal-destination dots on the board. Kept separate from
+ * accentRgba so the app-wide accent color can change without affecting
+ * these dots (and vice versa).
+ */
+export function moveIndicatorRgba(appMode, alpha = 1) {
+  const tokens = APP_MODE_TOKENS[appMode] ?? APP_MODE_TOKENS.dark
+  return `rgba(${tokens.moveIndicator.replace(/ /g, ', ')}, ${alpha})`
 }
 
 /**
