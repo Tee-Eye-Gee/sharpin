@@ -232,11 +232,11 @@ export function usePuzzleEngine() {
 
   // Purely presentational: puts the board back at the puzzle's start
   // position (same derivation as loadPuzzle's setup-move handling) so the
-  // user can attempt again. The outcome was already fixed at the original
-  // fail-commit, so this never touches storage.
+  // user can attempt again. The outcome (solved or failed) was already
+  // fixed at the original commit, so this never touches storage.
   const retryPuzzle = useCallback(() => {
     const puzzle = puzzleRef.current
-    if (!puzzle || status !== 'failed') return
+    if (!puzzle || (status !== 'failed' && status !== 'solved')) return
 
     const chess = new Chess(puzzle.fen)
     chessRef.current = chess

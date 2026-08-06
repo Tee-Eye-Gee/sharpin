@@ -19,12 +19,11 @@ export default function PuzzleControls({
   const isSolved = status === 'solved'
   const isFailed = status === 'failed'
   const isActive = status === 'solving' || status === 'correct'
-  // Retry offered whenever the puzzle is failed (original or post-retry) or
-  // a retry attempt is in progress -- covers the whole post-fail lifecycle
-  // without ever re-arming Give Up. Once a retry is solved, only Next
-  // Puzzle applies (same as a genuine first-try solve).
-  const showRetryRow = isFailed || (isRetrying && !isSolved)
-  const showNextOnly = isSolved
+  // Retry is offered on any resolved outcome -- failed or solved, original
+  // attempt or post-retry -- and stays offered through a retry attempt in
+  // progress. Navigation-boxed: only "Next Puzzle" clears it, by loading a
+  // fresh puzzle instance (never re-arms Give Up).
+  const showRetryRow = isFailed || isSolved || isRetrying
 
   // Tactical Lexicon: tap a theme chip for its plain-English definition.
   // Scoped to this component -- no shared tooltip/popover exists elsewhere
@@ -116,14 +115,6 @@ export default function PuzzleControls({
             Next Puzzle
           </button>
         </div>
-      ) : showNextOnly ? (
-        <button
-          onClick={onNextPuzzle}
-          className="w-full rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
-                     bg-accent text-black hover:brightness-110 active:scale-95"
-        >
-          Next Puzzle
-        </button>
       ) : (
         <button
           onClick={onGiveUp}

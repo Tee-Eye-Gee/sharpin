@@ -13,7 +13,6 @@ const HEADLINES = {
   loading: 'Loading puzzle…',
   solving: 'Find the best move',
   correct: 'Correct — keep going',
-  solved: 'Solved!',
   failed: 'Not quite',
   error: 'No puzzles available',
 }
@@ -108,8 +107,20 @@ export default function App() {
             <p className="text-xs text-fg-muted">
               {orientation === 'white' ? 'You are White' : 'You are Black'}
             </p>
-            <div className="text-xs font-medium px-2.5 py-1 rounded-full bg-surface text-fg-muted border border-border">
-              {HEADLINES[status] ?? ''}
+            <div
+              className={
+                status === 'solved'
+                  ? 'text-xs font-medium px-2.5 py-1 rounded-full bg-accent/10 text-accent border border-accent/40 flex items-center gap-1'
+                  : 'text-xs font-medium px-2.5 py-1 rounded-full bg-surface text-fg-muted border border-border'
+              }
+            >
+              {status === 'solved' ? (
+                <>
+                  <span aria-hidden="true">✓</span> Solved
+                </>
+              ) : (
+                HEADLINES[status] ?? ''
+              )}
             </div>
           </div>
 
