@@ -38,7 +38,7 @@ function getLegalDestinations(chess, square) {
   return destinations
 }
 
-export default function Board({ fen, orientation, status, lastMove, onUserMove, boardTheme, appMode, inputMode }) {
+export default function Board({ fen, orientation, status, lastMove, hintPieceSquare, hintDestSquare, onUserMove, boardTheme, appMode, inputMode }) {
   const isPlayable = status === 'solving'
   const isTapMode = inputMode === 'tap'
   const { light: lightSquare, dark: darkSquare } = BOARD_THEMES[boardTheme] ?? BOARD_THEMES[DEFAULT_BOARD_THEME]
@@ -131,6 +131,24 @@ export default function Board({ fen, orientation, status, lastMove, onUserMove, 
       customSquareStyles[square] = info.isCapture
         ? { backgroundColor: base, boxShadow: `inset 0 0 0 4px ${moveIndicatorRgba(appMode, 0.55)}, inset 0 0 0 5px rgba(0, 0, 0, 0.35)` }
         : { backgroundColor: base, backgroundImage: `radial-gradient(circle, ${moveIndicatorRgba(appMode, 0.45)} 22%, transparent 24%), radial-gradient(circle, rgba(0, 0, 0, 0.35) 24%, transparent 26%)` }
+    }
+  }
+  // Hint highlights (spec Sharpin_Spec_HintSystem.md §3), applied last so
+  // they ring on top of (rather than get clobbered by) any lastMove/
+  // selection background on the same square. Distinct tokens per tier
+  // (moveIndicator for the piece, accent for the destination) so the two
+  // are visually distinguishable, reusing existing color tokens rather than
+  // adding new theme infrastructure for this feature.
+  if (hintPieceSquare) {
+    customSquareStyles[hintPieceSquare] = {
+      ...(customSquareStyles[hintPieceSquare] ?? {}),
+      boxShadow: `inset 0 0 0 4px ${moveIndicatorRgba(appMode, 0.9)}`,
+    }
+  }
+  if (hintDestSquare) {
+    customSquareStyles[hintDestSquare] = {
+      ...(customSquareStyles[hintDestSquare] ?? {}),
+      boxShadow: `inset 0 0 0 4px ${accentRgba(appMode, 0.9)}`,
     }
   }
 

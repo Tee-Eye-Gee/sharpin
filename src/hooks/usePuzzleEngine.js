@@ -50,9 +50,10 @@ export function usePuzzleEngine() {
   const puzzleRef = useRef(null)
   const plyRef = useRef(0)
   const startTimeRef = useRef(null)
-  // Sole commit guard: true once finishAttempt has written for this puzzle
-  // instance. Reset only in loadPuzzle, so no path (wrong move, give up, or
-  // a post-retry move) can ever produce a second write for the same puzzle.
+  // Sole commit guard: true once commitAttempt has written for this puzzle
+  // instance. Reset only in loadPuzzle, so no path (wrong move, hint press,
+  // or a post-retry move) can ever produce a second write for the same
+  // puzzle.
   const attemptCommittedRef = useRef(false)
 
   const [fen, setFen] = useState(null)
@@ -68,8 +69,19 @@ export function usePuzzleEngine() {
   // Plain UI-state flag — not a counter. True from the moment the user first
   // clicks Retry until the next loadPuzzle. Lets the board go interactive
   // again post-fail without re-arming the commit path (finishAttempt is
-  // gated separately, above) or resurrecting the Give Up affordance.
+  // gated separately, above).
   const [isRetrying, setIsRetrying] = useState(false)
+  // 0 = not pressed for the current move, 1 = piece highlighted, 2 = piece +
+  // destination highlighted. Re-armed to 0 every time plyRef advances (see
+  // onUserMove) — never touches attemptCommittedRef.
+  const [hintTier, setHintTier] = useState(0)
+  // Attempt-scoped (puzzle-instance-scoped), not retry-scoped: true the
+  // moment hint is first pressed anywhere in this puzzle instance's
+  // lifetime, including across retries. Reset only in loadPuzzle, same
+  // lifecycle as attemptCommittedRef — deliberately NOT reset by
+  // retryPuzzle (spec §9: hint-then-solve on any retry still reads
+  // "Solved - hint used").
+  const [hintUsedThisAttempt, setHintUsedThisAttempt] = useState(false)
 
   const advanceOpponentMove = useCallback(() => {
     const puzzle = puzzleRef.current
@@ -120,6 +132,8 @@ export function usePuzzleEngine() {
     puzzleRef.current = chosen
     attemptCommittedRef.current = false
     setIsRetrying(false)
+    setHintTier(0)
+    setHintUsedThisAttempt(false)
     setLastMove(null)
 
     // The stored FEN is the position before the opponent's setup move
@@ -140,7 +154,13 @@ export function usePuzzleEngine() {
     setStatus('solving')
   }, [])
 
-  const finishAttempt = useCallback(async (solved) => {
+  // Write + coach-note portion only — no status transition. Fires exactly
+  // once per attempt instance, gated by attemptCommittedRef, regardless of
+  // what triggers it (a hint tier-1 press or a move-driven puzzle-finish).
+  // Coach note is generated here (at commit time), not deferred to
+  // puzzle-finish, so a hint-then-abandon (Next Puzzle without finishing)
+  // still surfaces it — see docs/specs/Sharpin_Spec_HintSystem.md §10a.
+  const commitAttempt = useCallback(async (solved) => {
     // Synchronous, pre-await: closes off the same-tick re-entrancy window
     // (see usePuzzleEngine.js commit-guard note) as well as any post-retry
     // call — this is the single point every commit path must clear.
@@ -164,13 +184,23 @@ export function usePuzzleEngine() {
     setUserRating(updatedProfile.rating)
     setLastDelta(delta)
     setStreak(updatedProfile.currentStreak)
-    setStatus(solved ? 'solved' : 'failed')
 
     // Rule-based, fully local — no network call, no API key. Reads the
     // attempt log this same recordAttempt() call just wrote to.
     const attempts = await getAllAttempts()
     setCoachNote(generateCoachNote({ themes: puzzle.themes, solved, profile: updatedProfile, attempts }))
   }, [])
+
+  // Status-transition portion — invoked only at actual puzzle-finish (wrong
+  // move, or completed correct sequence). Always reflects the real move
+  // outcome, independent of whatever commitAttempt already wrote: a puzzle
+  // can score-fail via an earlier hint press and still finish 'solved' here
+  // (spec §4) — commitAttempt no-ops in that case (already committed), but
+  // the status shown to the user tracks the actual finish, not the write.
+  const finishAttempt = useCallback(async (solved) => {
+    await commitAttempt(solved)
+    setStatus(solved ? 'solved' : 'failed')
+  }, [commitAttempt])
 
   const onUserMove = useCallback((sourceSquare, targetSquare, piece) => {
     if (status !== 'solving') return false
@@ -203,6 +233,7 @@ export function usePuzzleEngine() {
     if (!result) return false
 
     plyRef.current += 1
+    setHintTier(0) // re-arm tier 1 for the new current move
     setFen(chess.fen())
     setLastMove({ from: result.from, to: result.to })
 
@@ -225,10 +256,28 @@ export function usePuzzleEngine() {
     return true
   }, [status, isRetrying, finishAttempt, advanceOpponentMove])
 
-  const giveUp = useCallback(() => {
-    if (status !== 'solving' && status !== 'correct') return
-    finishAttempt(false)
-  }, [status, finishAttempt])
+  // Tier 1 on first press for the current move, tier 2 on the second —
+  // capped there until the next move re-arms it (see the onUserMove reset
+  // above). First press of the whole puzzle instance commits the
+  // scoring-fail write immediately (commitAttempt is itself idempotent past
+  // that point, so later presses on later moves are safe no-ops write-wise)
+  // but never touches status — board stays interactive through to actual
+  // puzzle-finish, per spec §4.
+  const pressHint = useCallback(() => {
+    if (status !== 'solving') return
+    setHintTier((prev) => {
+      if (prev === 0) {
+        setHintUsedThisAttempt(true)
+        // Explicit skip, mirroring onUserMove's own isRetrying branch —
+        // structurally redundant with the ref-guard in commitAttempt
+        // (isRetrying can only be true once attemptCommittedRef already
+        // is), but kept explicit for readability/symmetry per the Aug 7
+        // investigation's item 5 resolution.
+        if (!isRetrying) commitAttempt(false)
+      }
+      return Math.min(prev + 1, 2)
+    })
+  }, [status, isRetrying, commitAttempt])
 
   // Purely presentational: puts the board back at the puzzle's start
   // position (same derivation as loadPuzzle's setup-move handling) so the
@@ -250,10 +299,18 @@ export function usePuzzleEngine() {
     setLastMove(null)
     setFen(chess.fen())
     setIsRetrying(true)
+    setHintTier(0) // note: hintUsedThisAttempt deliberately survives the retry
     setStatus('solving')
   }, [status])
 
   useEffect(() => { loadPuzzle() }, [loadPuzzle])
+
+  // Derived display-only squares for the current tier — recomputed each
+  // render from the refs, not stored separately, since hintTier is the only
+  // thing that needs to be reactive here.
+  const currentExpectedUci = puzzleRef.current?.moves?.[plyRef.current]
+  const hintPieceSquare = hintTier >= 1 && currentExpectedUci ? currentExpectedUci.slice(0, 2) : null
+  const hintDestSquare = hintTier >= 2 && currentExpectedUci ? currentExpectedUci.slice(2, 4) : null
 
   return {
     fen,
@@ -267,9 +324,12 @@ export function usePuzzleEngine() {
     coachNote,
     lastMove,
     isRetrying,
+    hintPieceSquare,
+    hintDestSquare,
+    hintUsedThisAttempt,
     onUserMove,
     loadNextPuzzle: loadPuzzle,
-    giveUp,
+    pressHint,
     retryPuzzle,
   }
 }

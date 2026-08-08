@@ -30,9 +30,12 @@ export default function App() {
     coachNote,
     lastMove,
     isRetrying,
+    hintPieceSquare,
+    hintDestSquare,
+    hintUsedThisAttempt,
     onUserMove,
     loadNextPuzzle,
-    giveUp,
+    pressHint,
     retryPuzzle,
   } = usePuzzleEngine()
 
@@ -116,7 +119,7 @@ export default function App() {
             >
               {status === 'solved' ? (
                 <>
-                  <span aria-hidden="true">✓</span> Solved
+                  <span aria-hidden="true">✓</span> {hintUsedThisAttempt ? 'Solved - hint used' : 'Solved'}
                 </>
               ) : (
                 HEADLINES[status] ?? ''
@@ -129,6 +132,8 @@ export default function App() {
             orientation={orientation}
             status={status}
             lastMove={lastMove}
+            hintPieceSquare={hintPieceSquare}
+            hintDestSquare={hintDestSquare}
             onUserMove={onUserMove}
             boardTheme={boardTheme}
             appMode={appMode}
@@ -145,7 +150,7 @@ export default function App() {
               currentThemes={currentThemes}
               isRetrying={isRetrying}
               onNextPuzzle={loadNextPuzzle}
-              onGiveUp={giveUp}
+              onHint={pressHint}
               onRetry={retryPuzzle}
             />
           </div>

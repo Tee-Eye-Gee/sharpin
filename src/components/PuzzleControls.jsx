@@ -13,17 +13,21 @@ export default function PuzzleControls({
   currentThemes,
   isRetrying,
   onNextPuzzle,
-  onGiveUp,
+  onHint,
   onRetry,
 }) {
-  const isSolved = status === 'solved'
-  const isFailed = status === 'failed'
-  const isActive = status === 'solving' || status === 'correct'
-  // Retry is offered on any resolved outcome -- failed or solved, original
-  // attempt or post-retry -- and stays offered through a retry attempt in
-  // progress. Navigation-boxed: only "Next Puzzle" clears it, by loading a
-  // fresh puzzle instance (never re-arms Give Up).
-  const showRetryRow = isFailed || isSolved || isRetrying
+  const isResolved = status === 'solved' || status === 'failed'
+  // 4-state row (spec §7, extended to unlimited retry per §10a):
+  //   resolved (any cycle, first attempt or Nth retry)  -> Retry + Next Puzzle
+  //   attempting + isRetrying (follow-up, mid-attempt)  -> Hint + Next Puzzle
+  //   attempting + !isRetrying (initial try)             -> Hint only
+  // Order matters: a resolved follow-up attempt (isRetrying true, status
+  // solved/failed) must hit the Retry+Next row, not the Hint+Next one --
+  // isRetrying only distinguishes the *mid-attempt* rows once resolved is
+  // ruled out.
+  const showRetryRow = isResolved
+  const showHintNextRow = !isResolved && isRetrying
+  const canHint = status === 'solving'
 
   // Tactical Lexicon: tap a theme chip for its plain-English definition.
   // Scoped to this component -- no shared tooltip/popover exists elsewhere
@@ -115,15 +119,34 @@ export default function PuzzleControls({
             Next Puzzle
           </button>
         </div>
+      ) : showHintNextRow ? (
+        <div className="flex gap-2">
+          <button
+            onClick={onHint}
+            disabled={!canHint}
+            className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                       border border-accent/40 text-accent hover:bg-accent/10 active:scale-95
+                       disabled:opacity-40 disabled:pointer-events-none"
+          >
+            Hint
+          </button>
+          <button
+            onClick={onNextPuzzle}
+            className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                       bg-accent text-black hover:brightness-110 active:scale-95"
+          >
+            Next Puzzle
+          </button>
+        </div>
       ) : (
         <button
-          onClick={onGiveUp}
-          disabled={!isActive}
-          className="w-full rounded-lg py-2 text-sm font-medium text-fg-muted
-                     border border-border-strong hover:border-red-900 hover:text-red-400
-                     transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
+          onClick={onHint}
+          disabled={!canHint}
+          className="w-full rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                     border border-accent/40 text-accent hover:bg-accent/10 active:scale-95
+                     disabled:opacity-40 disabled:pointer-events-none"
         >
-          Give Up
+          Hint
         </button>
       )}
     </div>
