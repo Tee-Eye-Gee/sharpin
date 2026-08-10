@@ -102,6 +102,7 @@ export function usePuzzleEngine() {
 
     const profile = await getProfile()
     setUserRating(profile.rating)
+    setStreak(profile.currentStreak)
 
     const recent = await getRecentAttempts(RECENT_WINDOW)
     const excludeIds = new Set(recent.map((a) => a.puzzleId))
