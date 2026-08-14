@@ -57,6 +57,12 @@ export function usePuzzleEngine() {
   const attemptCommittedRef = useRef(false)
 
   const [fen, setFen] = useState(null)
+  // The position where solving begins (post opponent-setup-move) -- fixed
+  // for the whole puzzle instance, unlike `fen` which advances with every
+  // move. Analyze mode's entry point per spec §2 ("starting FEN, not final
+  // position"); survives retries since retryPuzzle rebuilds this exact
+  // position without touching this value.
+  const [puzzleStartFen, setPuzzleStartFen] = useState(null)
   const [orientation, setOrientation] = useState('white')
   const [status, setStatus] = useState('loading') // loading | solving | correct | solved | failed
   const [userRating, setUserRating] = useState(null)
@@ -150,6 +156,7 @@ export function usePuzzleEngine() {
     setCurrentThemes(chosen.themes)
     setPuzzleRating(chosen.rating)
     setFen(chess.fen())
+    setPuzzleStartFen(chess.fen())
     setLastDelta(0)
     startTimeRef.current = Date.now()
     setStatus('solving')
@@ -315,6 +322,7 @@ export function usePuzzleEngine() {
 
   return {
     fen,
+    puzzleStartFen,
     orientation,
     status,
     userRating,

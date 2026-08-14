@@ -11,6 +11,7 @@ export default function PuzzleControls({
   onNextPuzzle,
   onHint,
   onRetry,
+  onAnalyze,
 }) {
   const isResolved = status === 'solved' || status === 'failed'
   // 4-state row (spec §7, extended to unlimited retry per §10a):
@@ -59,21 +60,39 @@ export default function PuzzleControls({
       </div>
 
       {showRetryRow ? (
-        <div className="flex gap-2">
-          <button
-            onClick={onRetry}
-            className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
-                       border border-accent/40 text-accent hover:bg-accent/10 active:scale-95"
-          >
-            Retry
-          </button>
-          <button
-            onClick={onNextPuzzle}
-            className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
-                       bg-accent text-black hover:brightness-110 active:scale-95"
-          >
-            Next Puzzle
-          </button>
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={onRetry}
+              className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                         border border-accent/40 text-accent hover:bg-accent/10 active:scale-95"
+            >
+              Retry
+            </button>
+            <button
+              onClick={onNextPuzzle}
+              className="flex-1 rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                         bg-accent text-black hover:brightness-110 active:scale-95"
+            >
+              Next Puzzle
+            </button>
+          </div>
+          {/* Success-only (spec Sharpin_Spec_AnalyzeMode.md §2): status alone
+              gates this -- 'solved' covers both "Solved" and "Solved - hint
+              used" (hintUsedThisAttempt only changes the pill text, not
+              status), so no extra prop needs threading through for this.
+              Stacked full-width below rather than a 3rd flex-1 button in the
+              row above -- keeps Retry/Next Puzzle's labels from cramping at
+              375px. */}
+          {status === 'solved' && (
+            <button
+              onClick={onAnalyze}
+              className="w-full rounded-lg py-2.5 font-semibold text-sm tracking-wide transition-all
+                         border border-accent/40 text-accent hover:bg-accent/10 active:scale-95"
+            >
+              Analyze
+            </button>
+          )}
         </div>
       ) : showHintNextRow ? (
         <div className="flex gap-2">

@@ -8,6 +8,7 @@ import Board            from './components/Board'
 import PuzzleControls   from './components/PuzzleControls'
 import ProgressPanel    from './components/ProgressPanel'
 import CoachNote        from './components/CoachNote'
+import AnalyzePanel     from './components/AnalyzePanel'
 
 const HEADLINES = {
   loading: 'Loading puzzle…',
@@ -20,6 +21,7 @@ const HEADLINES = {
 export default function App() {
   const {
     fen,
+    puzzleStartFen,
     orientation,
     status,
     userRating,
@@ -43,6 +45,14 @@ export default function App() {
   const [boardTheme, setBoardTheme] = useState(DEFAULT_BOARD_THEME)
   const [inputMode, setInputMode] = useState('drag')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Analyze mode is a full replacement of the puzzle-solving board+controls
+  // layout below, not an overlay alongside it (spec
+  // Sharpin_Spec_AnalyzeMode.md §4) -- only ever set true via the Analyze
+  // button (itself only shown when status === 'solved'), false via Exit.
+  // AnalyzePanel owns all of its own state locally and unmounting it (this
+  // flag flipping back to false) is the entire cleanup, so no other
+  // transition needs to touch this.
+  const [analyzeMode, setAnalyzeMode] = useState(false)
 
   // On first mount: load persisted preferences. If app mode has never been
   // set, detect it from the OS once and persist that as the permanent
@@ -104,66 +114,79 @@ export default function App() {
       )}
 
       <main className="flex-1 flex flex-col md:flex-row gap-0 md:gap-4 p-4 md:p-6 max-w-5xl mx-auto w-full">
-
-        <div className="flex flex-col gap-3 w-full md:max-w-[520px]">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-fg-muted">
-              {orientation === 'white' ? 'You are White' : 'You are Black'}
-            </p>
-            <div
-              className={
-                status === 'solved'
-                  ? 'text-xs font-medium px-2.5 py-1 rounded-full bg-accent/10 text-accent border border-accent/40 flex items-center gap-1'
-                  : 'text-xs font-medium px-2.5 py-1 rounded-full bg-surface text-fg-muted border border-border'
-              }
-            >
-              {status === 'solved' ? (
-                <>
-                  <span aria-hidden="true">✓</span> {hintUsedThisAttempt ? 'Solved - hint used' : 'Solved'}
-                </>
-              ) : (
-                HEADLINES[status] ?? ''
-              )}
-            </div>
-          </div>
-
-          <Board
-            fen={fen}
+        {analyzeMode ? (
+          <AnalyzePanel
+            startFen={puzzleStartFen}
             orientation={orientation}
-            status={status}
-            lastMove={lastMove}
-            hintPieceSquare={hintPieceSquare}
-            hintDestSquare={hintDestSquare}
-            onUserMove={onUserMove}
             boardTheme={boardTheme}
             appMode={appMode}
             inputMode={inputMode}
+            onExit={() => setAnalyzeMode(false)}
           />
-          <CoachNote status={status} coachNote={coachNote} />
-        </div>
+        ) : (
+          <>
+            <div className="flex flex-col gap-3 w-full md:max-w-[520px]">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-fg-muted">
+                  {orientation === 'white' ? 'You are White' : 'You are Black'}
+                </p>
+                <div
+                  className={
+                    status === 'solved'
+                      ? 'text-xs font-medium px-2.5 py-1 rounded-full bg-accent/10 text-accent border border-accent/40 flex items-center gap-1'
+                      : 'text-xs font-medium px-2.5 py-1 rounded-full bg-surface text-fg-muted border border-border'
+                  }
+                >
+                  {status === 'solved' ? (
+                    <>
+                      <span aria-hidden="true">✓</span> {hintUsedThisAttempt ? 'Solved - hint used' : 'Solved'}
+                    </>
+                  ) : (
+                    HEADLINES[status] ?? ''
+                  )}
+                </div>
+              </div>
 
-        <aside className="flex flex-col gap-4 w-full md:w-64 lg:w-72 flex-shrink-0 mt-4 md:mt-0">
-          <div className="bg-surface border border-border rounded-lg p-4">
-            <PuzzleControls
-              status={status}
-              puzzleRating={puzzleRating}
-              currentThemes={currentThemes}
-              isRetrying={isRetrying}
-              onNextPuzzle={loadNextPuzzle}
-              onHint={pressHint}
-              onRetry={retryPuzzle}
-            />
-          </div>
+              <Board
+                fen={fen}
+                orientation={orientation}
+                status={status}
+                lastMove={lastMove}
+                hintPieceSquare={hintPieceSquare}
+                hintDestSquare={hintDestSquare}
+                onUserMove={onUserMove}
+                boardTheme={boardTheme}
+                appMode={appMode}
+                inputMode={inputMode}
+              />
+              <CoachNote status={status} coachNote={coachNote} />
+            </div>
 
-          <div className="bg-surface border border-border rounded-lg p-4">
-            <ProgressPanel
-              userRating={userRating}
-              lastDelta={lastDelta}
-              streak={streak}
-              refreshKey={status}
-            />
-          </div>
-        </aside>
+            <aside className="flex flex-col gap-4 w-full md:w-64 lg:w-72 flex-shrink-0 mt-4 md:mt-0">
+              <div className="bg-surface border border-border rounded-lg p-4">
+                <PuzzleControls
+                  status={status}
+                  puzzleRating={puzzleRating}
+                  currentThemes={currentThemes}
+                  isRetrying={isRetrying}
+                  onNextPuzzle={loadNextPuzzle}
+                  onHint={pressHint}
+                  onRetry={retryPuzzle}
+                  onAnalyze={() => setAnalyzeMode(true)}
+                />
+              </div>
+
+              <div className="bg-surface border border-border rounded-lg p-4">
+                <ProgressPanel
+                  userRating={userRating}
+                  lastDelta={lastDelta}
+                  streak={streak}
+                  refreshKey={status}
+                />
+              </div>
+            </aside>
+          </>
+        )}
       </main>
     </div>
   )
