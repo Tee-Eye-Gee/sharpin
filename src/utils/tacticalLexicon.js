@@ -18,6 +18,7 @@ export const THEME_DEFINITIONS = {
   crushing: "The opponent handed you a big mistake — cash in for a decisive advantage.",
   doubleBishopMate: "Two bishops on neighboring diagonals deliver mate to a king with no escape squares.",
   dovetailMate: "The queen mates a king whose only two flight squares are blocked by its own pieces.",
+  epauletteMate: "Frontal checkmate with king flanked by its own pieces.",
   equality: "Clawing back from a losing spot to reach a draw or roughly even position.",
   kingsideAttack: "An assault on the enemy king after it castled kingside.",
   clearance: "A move that vacates a square, file, or diagonal to make room for the real tactic.",
