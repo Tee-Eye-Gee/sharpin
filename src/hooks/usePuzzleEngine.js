@@ -55,6 +55,11 @@ export function usePuzzleEngine() {
   // or a post-retry move) can ever produce a second write for the same
   // puzzle.
   const attemptCommittedRef = useRef(false)
+  // Mirrors hintUsedThisAttempt state for synchronous reads inside
+  // commitAttempt, which is a stable (empty-deps) callback and would
+  // otherwise close over a stale value. Same lifecycle as
+  // hintUsedThisAttempt: set together, reset only in loadPuzzle.
+  const hintUsedRef = useRef(false)
 
   const [fen, setFen] = useState(null)
   // The position where solving begins (post opponent-setup-move) -- fixed
@@ -138,6 +143,7 @@ export function usePuzzleEngine() {
     chessRef.current = chess
     puzzleRef.current = chosen
     attemptCommittedRef.current = false
+    hintUsedRef.current = false
     setIsRetrying(false)
     setHintTier(0)
     setHintUsedThisAttempt(false)
@@ -184,6 +190,7 @@ export function usePuzzleEngine() {
       puzzleId: puzzle.id,
       themes: puzzle.themes,
       solved,
+      hintUsed: hintUsedRef.current,
       newRating,
       ratingDelta: delta,
       timeTakenMs,
@@ -275,6 +282,7 @@ export function usePuzzleEngine() {
     if (status !== 'solving') return
     setHintTier((prev) => {
       if (prev === 0) {
+        hintUsedRef.current = true
         setHintUsedThisAttempt(true)
         // Explicit skip, mirroring onUserMove's own isRetrying branch —
         // structurally redundant with the ref-guard in commitAttempt

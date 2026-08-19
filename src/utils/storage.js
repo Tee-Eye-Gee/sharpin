@@ -1,7 +1,7 @@
 import { DEFAULT_RATING } from './rating'
 
 const DB_NAME = 'sharpin'
-const DB_VERSION = 2
+const DB_VERSION = 3
 const STORE_PROFILE = 'profile'
 const STORE_ATTEMPTS = 'attempts'
 const STORE_THEME_STATS = 'themeStats'
@@ -150,6 +150,13 @@ export async function getWeakThemes(limit = 3, minAttempts = 3) {
     .slice(0, limit)
 }
 
+// v3 added hintUsed to the attempt record shape; records written under v2
+// have no such field. Default it at read time (same pattern as
+// getPreferences' spread-default) rather than backfilling stored rows.
+function withHintUsedDefault(attempt) {
+  return { ...attempt, hintUsed: attempt.hintUsed ?? false }
+}
+
 /**
  * Most recent N attempts, newest first — used to weight puzzle selection
  * away from themes the user has just seen.
@@ -158,7 +165,7 @@ export async function getRecentAttempts(limit = 15) {
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
-  return all.slice(-limit).reverse()
+  return all.slice(-limit).reverse().map(withHintUsedDefault)
 }
 
 /**
@@ -170,7 +177,7 @@ export async function getAllAttempts() {
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
-  return all.slice().reverse()
+  return all.slice().reverse().map(withHintUsedDefault)
 }
 
 async function appendAttempt(db, attempt) {
@@ -190,12 +197,13 @@ async function appendAttempt(db, attempt) {
  * @param {string} params.puzzleId
  * @param {string[]} params.themes
  * @param {boolean} params.solved
+ * @param {boolean} params.hintUsed
  * @param {number} params.newRating
  * @param {number} params.ratingDelta
  * @param {number} params.timeTakenMs
  * @returns {Promise<object>} the updated profile
  */
-export async function recordAttempt({ puzzleId, themes, solved, newRating, ratingDelta, timeTakenMs }) {
+export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRating, ratingDelta, timeTakenMs }) {
   const db = await openDB()
   const profile = await getProfile()
 
@@ -209,7 +217,7 @@ export async function recordAttempt({ puzzleId, themes, solved, newRating, ratin
   }
 
   await Promise.all([
-    appendAttempt(db, { puzzleId, themes, solved, ratingDelta, timeTakenMs, at: Date.now() }),
+    appendAttempt(db, { puzzleId, themes, solved, hintUsed: !!hintUsed, ratingDelta, timeTakenMs, at: Date.now() }),
     bumpThemeStats(db, themes, solved),
     saveProfile(updated),
   ])
