@@ -15,6 +15,9 @@ data/raw/
 # Vercel
 .vercel/
 
+# Supabase CLI cache
+supabase/.temp/
+
 # OS / editor
 .DS_Store
 Thumbs.db
