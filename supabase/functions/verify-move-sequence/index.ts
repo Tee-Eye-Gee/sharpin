@@ -10,13 +10,20 @@
 // Never logs or persists the raw move sequence: only a hash arrives here,
 // and only the match/no-match result (plus, on match, a session) leaves.
 //
-// This is the one intentionally pre-auth, publicly-callable endpoint in the
-// system, so it also rate-limits by caller IP (see RATE_LIMIT_* below and
-// the build-stage-2-revision report) before doing anything else.
+// This is one of two intentionally pre-auth, publicly-callable endpoints in
+// the system (the other is create-account), so it also rate-limits by
+// caller IP (see RATE_LIMIT_* below and the build-stage-2-revision report)
+// before doing anything else.
 //
-// NOT DEPLOYED. Written for review only -- see build-stage-2 (+ revision) report.
+// Session-minting (generateLink+verifyOtp) lives in ../_shared/mint-session.ts,
+// shared with create-account -- extracted here during the Stage 3 build.
+// This function's own request/response behavior is unchanged by that
+// extraction.
+//
+// Deployed to project wrexmksxphqkanrzzvcd (verify_jwt: true).
 
 import { createClient } from '@supabase/supabase-js'
+import { mintSessionForProfile } from '../_shared/mint-session.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -27,14 +34,9 @@ const RATE_LIMIT_MAX_ATTEMPTS = 10
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
 
 // Comma-separated allowlist, e.g. "https://sharpin.app,https://sharpin-git-main-tiggs.vercel.app".
-// NOT SET YET -- this repo has no vercel.json and no reference anywhere to
-// a production or preview URL (confirmed by grep during the Stage 2
-// revision pass), so there was nothing to read the real value from and
-// nothing safe to guess. This MUST be set via `supabase secrets set
-// ALLOWED_ORIGINS=...` before deployment (Stage 3), or every browser
-// caller will be CORS-blocked (see buildCorsHeaders -- an unmatched/absent
-// Origin gets no Access-Control-Allow-Origin header at all, failing closed
-// rather than falling back to "*").
+// Set via `supabase secrets set ALLOWED_ORIGINS=...` (see buildCorsHeaders --
+// an unmatched/absent Origin gets no Access-Control-Allow-Origin header at
+// all, failing closed rather than falling back to "*").
 const ALLOWED_ORIGINS_ENV = 'ALLOWED_ORIGINS'
 
 function buildCorsHeaders(req: Request): Record<string, string> {
@@ -74,27 +76,6 @@ function getClientIp(req: Request): string {
   const xff = req.headers.get('x-forwarded-for')
   if (!xff) return 'unknown'
   return xff.split(',')[0].trim() || 'unknown'
-}
-
-// Deterministic, non-deliverable placeholder address used only as the
-// lookup key for admin.generateLink()'s magiclink flow -- never sent
-// anywhere, never real mail (see report's "session-minting approach"
-// section for why generateLink+verifyOtp was chosen over hand-signing a
-// custom JWT).
-//
-// DEPENDENCY THIS CREATES FOR STAGE 3: whatever flow first creates a
-// profiles row must also call
-//   admin.auth.admin.updateUserById(profileId, { email: syntheticEmailFor(profileId), email_confirm: true })
-// on that same auth.users row at creation time. If that's skipped,
-// generateLink() below will silently CREATE A NEW, unrelated auth user
-// (generateLink's magiclink type creates a user if the email doesn't
-// already resolve to one) instead of resolving to the existing matched
-// profile. The id-mismatch guard near the end of this function turns that
-// failure mode into an explicit error instead of a silently wrong session,
-// but it can't fix a missing Stage-3 wiring step -- flagging this loudly so
-// it isn't lost before Stage 3 starts.
-function syntheticEmailFor(profileId: string): string {
-  return `${profileId}@auth.sharpin.internal`
 }
 
 Deno.serve(async (req: Request) => {
@@ -190,43 +171,11 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ match: false }, 200)
   }
 
-  const email = syntheticEmailFor(profile.id)
+  const minted = await mintSessionForProfile(admin, profile.id)
 
-  const { data: linkData, error: linkError } = await admin.auth.admin.generateLink({
-    type: 'magiclink',
-    email,
-  })
-
-  if (linkError || !linkData?.properties?.hashed_token) {
-    return jsonResponse({ error: 'session mint failed' }, 500)
+  if (!minted.ok) {
+    return jsonResponse({ error: minted.error }, 500)
   }
 
-  const { data: sessionData, error: verifyError } = await admin.auth.verifyOtp({
-    type: 'magiclink',
-    token_hash: linkData.properties.hashed_token,
-  })
-
-  if (verifyError || !sessionData?.session) {
-    return jsonResponse({ error: 'session mint failed' }, 500)
-  }
-
-  // Safety check: see the syntheticEmailFor() comment above. Refuse rather
-  // than hand back a session for the wrong user.
-  if (sessionData.session.user.id !== profile.id) {
-    return jsonResponse(
-      { error: 'session identity mismatch -- profile not provisioned correctly, refusing to return a session' },
-      500,
-    )
-  }
-
-  return jsonResponse(
-    {
-      match: true,
-      session: {
-        access_token: sessionData.session.access_token,
-        refresh_token: sessionData.session.refresh_token,
-      },
-    },
-    200,
-  )
+  return jsonResponse({ match: true, session: minted.session }, 200)
 })

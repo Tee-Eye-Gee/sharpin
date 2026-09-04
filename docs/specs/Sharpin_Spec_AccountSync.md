@@ -81,34 +81,58 @@ Finalized against investigation findings (Aug 18) — corrects the original draf
 
 ## 5. App Flow
 
-**First launch (no account, no local history):**
-- Standard board, standard starting rating
-- Choice: "Login" or "Play Free"
-- Play Free → straight into puzzles, guest IndexedDB state, no account
-- Login → 4-move board
+**Launch routing (every app boot):**
+- Device boot check: valid local Supabase session on this device → skip any screen entirely, auto-resume directly into gameplay (account data is already local/cached from the last sync — see §6 for sync triggers; boot does not block on a synchronous re-fetch).
+- No valid session → show a 3-tier launch screen:
+  - **Play as Guest** (primary) → straight into puzzles, guest IndexedDB state, no account.
+  - **Create Account** (secondary) → new profile creation; see §5a.
+  - **Login** (tertiary, link-styled — visually subordinate to the two primary actions) → 4-move gesture entry against an existing account.
 
-**4-move gesture entry:**
-- New/unrecognized device → establishes session (full hybrid verification per §3)
-- Known device with valid persisted session → gesture resumes/re-confirms, no new handshake needed
-- On success → pulls account data (rating, streak, needs-work areas) from Supabase
+**Login / 4-move gesture entry:**
+- Reached only from the "Login" tertiary link on the launch screen — by definition only shown when there is no valid persisted session. Every gesture entry therefore performs full hybrid verification per §3; there is no separate "known device, skip re-verification" branch. (That case — a device that already holds a valid session — is handled entirely by the boot check above, which skips the launch screen altogether rather than showing it and then short-circuiting the gesture. This supersedes the old spec's "known device with valid persisted session → gesture resumes/re-confirms" branch, which no longer has a code path that would reach it.)
+- `verify-move-sequence` checks the submitted hash against **existing** `move_sequence_hash` rows only. It has no create path today and must not gain one.
+- **Locked decision: profile creation is never a fallback from a failed Login/verify-move-sequence attempt.** A no-match result is a plain login failure — it returns the user to the launch screen (or an inline "not recognized" state on it). Creating an account, if the user wants one, always requires the separate, explicit Create Account action described in §5a.
+- On success → pulls account data (rating, streak, needs-work areas) from Supabase.
 
-**Return visits (any device, already logged in):**
-- Auto-resume directly into the account session — no "Login or Play Free" screen shown again
-- Choice screen only reappears after explicit logout
+**Login visibility constraint:**
+- The Login control (tertiary link) is exposed only on the launch screen — i.e., between puzzles / before a session starts. It is never exposed anywhere in the mid-puzzle UI.
+- No guard exists, or is planned, to protect an in-flight attempt commit from a mid-puzzle identity change (`usePuzzleEngine.js` investigation finding: puzzle-instance state carries no identity of its own — it resolves whatever the storage layer returns at commit time, whether that's still the guest profile or a just-authenticated one). Keeping Login unreachable during an active puzzle **is** the entire mitigation for this risk, not a UI convenience layered on top of a code-level guard.
 
 **Logout:**
 - Reverts UI to standard opening board, standard starting rating
 - Underlying guest/local IndexedDB state (if any existed before or during this session) persists untouched — not wiped
 - Session token cleared for this device
+- Returns to the 3-tier launch screen (Guest / Create Account / Login) described above — the screen only reappears after this explicit logout, or whenever the boot check finds no valid session
 
 **Guest → account migration:**
-- Triggered any time a device transitions into a logged-in state (fresh install with pre-existing local history, OR guest-play history followed by later login) and finds local IndexedDB data not yet tied to an account
-- User is offered to adopt that local history into the account (single migration path for both trigger cases)
+- Triggered any time a device transitions into a logged-in state (fresh install with pre-existing local history and a fresh Create Account, OR guest-play history on this device followed by later Login to an existing account) and finds local IndexedDB data not yet tied to an account.
+- User is prompted to choose explicitly — never auto-resolved:
+  - **Merge** — adopt the local history into the account.
+  - **Discard** — leave the account as-is; drop the local guest history.
 
 **Admin panel entry (separate, unrelated):**
 - Triple-tap Sharpin logo → password-gated screen (placeholder auth for now, modeled on Fluency's approach — real spec pulled later)
 - Entirely separate from the 4-move identity system
 - Panel contents out of scope for this spec (backlog #5)
+
+## 5a. Create Account — Server Operation (NEW)
+
+Status: this logic does not exist yet. Confirmed via investigation — the current `verify-move-sequence` Edge Function only ever performs a lookup against existing `profiles` rows (`.maybeSingle()` on `move_sequence_hash`) and returns `{ match: false }` on no match; it has no insert/create path. Create Account is a new, separate Edge Function (see below), not an added branch inside the existing lookup.
+
+**Identity creation is entirely server-side.** The Create Account Edge Function is the only thing that creates the underlying `auth.users` row — there is no client-side `signInAnonymously()` call and no separate update-after-create step. A single `admin.createUser({ email: syntheticEmailFor(newProfileId), email_confirm: true })` call creates the auth user with its synthetic email already set at creation time. This is what makes the email-set atomic: there is no second step, so there is no window where a `profiles` row (or an auth user) could exist without its synthetic email — the exact gap `verify-move-sequence`'s own code comments flag as dangerous (an unset synthetic email would let a later Login's `generateLink()` magiclink call silently create a new, unrelated auth user instead of resolving to the real profile).
+
+**Final operation order:**
+1. **Collision check** — the newly-chosen 4-move sequence's hash is checked against `profiles.move_sequence_hash` (already `UNIQUE`) before doing anything else, so a collision surfaces as a clear "that sequence is already in use, choose another" response rather than a raw DB unique-constraint error, and before any auth user is created for a request that's going to fail anyway.
+2. **`admin.createUser({ email: syntheticEmailFor(newProfileId), email_confirm: true })`** — single call; creates the `auth.users` row with the synthetic email and confirmation already set.
+3. **Insert `profiles` row** — `id` = the new user's id (from step 2), `move_sequence_hash` = the new hash, `created_at` server-set (existing trigger).
+4. **Mint session** via the shared session-mint helper (same `generateLink()` + `verifyOtp()` pattern `verify-move-sequence` uses for Login).
+5. **Return session** to the client.
+
+**Separate Edge Function from `verify-move-sequence`, with shared session-minting code.** Create Account and Login/verify-move-sequence are two distinct Edge Functions, each with its own rate-limit/throttle policy — they have different abuse profiles (verify-move-sequence is a read/guess target; Create Account is a write/account-flooding target) and sharing one limiter would either under-throttle one or over-throttle the other. The `generateLink()` + `verifyOtp()` session-minting logic both functions need is factored into one small shared Deno module imported by both, so that logic isn't duplicated even though the two functions themselves stay separate.
+
+**File layout:** confirmed against the existing Stage 2 layout (`supabase/functions/verify-move-sequence/{deno.json,index.ts}`) — this fits cleanly with no changes needed elsewhere:
+- `supabase/functions/create-account/{deno.json,index.ts}` — new function, sibling to `verify-move-sequence`, same per-function directory convention already in use.
+- `supabase/functions/_shared/mint-session.ts` — the shared session-mint helper. An underscore-prefixed directory under `supabase/functions/` is Supabase's standard convention for code shared across functions (excluded from individual function deployment); no `_shared/` directory exists yet in this repo, so this introduces the convention rather than colliding with anything.
 
 ## 6. Sync Triggers
 
@@ -123,11 +147,18 @@ Per Tiggs's explicit call: the schema v3 migration needed for Personal Analytics
 - 4-move sequence has lower real-world entropy than a password — accepted for current single-user scope.
 - Supabase free-tier projects auto-pause after ~1 week of inactivity — accepted, may cause a cold-start delay on first open after a gap.
 - Per-record LWW does not merge conflicting edits to the *same* record made near-simultaneously on two devices — last server-timestamped write to that specific record wins. Given actual usage pattern (sequential device use, not simultaneous), risk is low but not zero.
-- **verify-move-sequence rate limiting is IP-based and spoofable.** A per-IP throttle (10 attempts / 15 min, via a `verify_attempts` table) was added as a deterrent against casual/naive automated guessing. Confirmed via Supabase community reports that `X-Forwarded-For` is not reliably trustworthy on this platform — a deliberate attacker can set an arbitrary value per request and bypass the throttle entirely. This is NOT a hard security boundary, only a deterrent layer; it does not compensate for the entropy risk above. Accepted because: (a) no dollar cost is possible on the free tier if abused — Supabase's Fair Use Policy returns 402 project-wide rather than billing overages, so worst case is a self-healing outage (resets next billing cycle), not a permanent cost; (b) the project's Supabase URL is not publicly discoverable/indexed, only present in the deployed JS bundle, making opportunistic/scanner-driven abuse unlikely; (c) RLS and hashing still hold even if the rate limit is bypassed — bypassing it only re-exposes the entropy risk already logged above, it doesn't create a new data-exposure path. Revisit if there's ever concrete reason to believe the app is being specifically targeted.
+- **verify-move-sequence and create-account rate limiting is IP-based; whether X-Forwarded-For is actually spoofable on this deployment is unconfirmed, not confirmed either way.** A per-IP throttle was added to both (verify-move-sequence: 10 attempts / 15 min via `verify_attempts`; create-account: 3 attempts / 60 min via `create_account_attempts`) as a deterrent against casual/naive automated abuse. Both functions' `getClientIp()` (identical logic — `create-account/index.ts:80-84`, same in `verify-move-sequence`) reads only the `X-Forwarded-For` header, with no fallback to any other header; the application code itself does nothing unusual here. This note previously stated, based on general Supabase community reports, that `X-Forwarded-For` is confirmed spoofable on this platform. Live testing during the Stage 3 build contradicts that for this specific deployment: a spoofed `X-Forwarded-For` value sent to create-account had no effect — both requests were logged under the real source IP regardless of what was sent. The underlying mechanism is **not confirmed** — there is no visibility from this repo into Supabase's edge/gateway layer, so this is an observed result from one live test, not a verified platform guarantee. Something upstream of the function (outside this repo) appears to be overwriting or sanitizing the header before either function sees it, but that is inference from behavior, not something checked against Supabase's own documentation or support. Practical implication: the rate limiter may be a firmer boundary against IP spoofing than originally assumed here, but this should not be treated as a hard security guarantee without further confirmation (e.g. directly from Supabase's docs/support, or more extensive testing across multiple spoofed values and conditions) — for planning purposes, continue treating it as NOT a hard security boundary. It does not compensate for the entropy risk above regardless of how the spoofing question resolves. Accepted because: (a) no dollar cost is possible on the free tier if abused — Supabase's Fair Use Policy returns 402 project-wide rather than billing overages, so worst case is a self-healing outage (resets next billing cycle), not a permanent cost; (b) the project's Supabase URL is not publicly discoverable/indexed, only present in the deployed JS bundle, making opportunistic/scanner-driven abuse unlikely; (c) RLS and hashing still hold even if the rate limit is bypassed — bypassing it only re-exposes the entropy risk already logged above, it doesn't create a new data-exposure path. Revisit if there's ever concrete reason to believe the app is being specifically targeted, or once the platform mechanism itself is actually confirmed one way or the other.
 
 ## 8a. CLAUDE.md Update Required
 
-Investigation flagged that CLAUDE.md's tech-stack section currently states "IndexedDB — local-only persistence, no auth, no cross-device sync" and "no backend, no API keys, zero network calls on solve/fail" — directly contradicted by this spec. CLAUDE.md's "Current task" pointer also still references Sharpin_Spec_ColorScheme.md. As part of this initiative's rollout (before or alongside the build prompt, not after): confirm the color-scheme task is actually complete, then update CLAUDE.md's tech-stack description and current-task pointer to reflect Supabase/auth/sync as the active architecture.
+Re-checked against the current file during the Stage 3 investigation pass (this revision) — the specific staleness logged here previously has already been partly fixed and is now inaccurate as written. What's actually true as of this revision:
+
+- **Already resolved, no longer an issue:** CLAUDE.md's "Current task" pointer already points at this spec (not Sharpin_Spec_ColorScheme.md), and the tech-stack section no longer says "no auth, no cross-device sync" — it already acknowledges Supabase work is in progress.
+- **Still wrong, needs fixing:**
+  1. CLAUDE.md's Environment section states "No API keys, no `.env` file needed." This is false — a `.env` file exists in the repo root (correctly gitignored). Needs updating regardless of whether Stage 3 client code ends up reading from it directly.
+  2. CLAUDE.md's tech-stack and current-task sections both describe Stage 1 of 3 as done and Stages 2-3 as "not built yet" / "not started." This undersells the actual state: Stage 2's migrations and the `verify-move-sequence` Edge Function are written and were previously reviewed and live-verified — investigation found Stage 2 is code-complete, just not currently deployed to a live Supabase project (the prior project was deleted for a key-exposure incident and needs re-provisioning before anything can run live against it). CLAUDE.md should distinguish "code written and reviewed" from "deployed and live," rather than lumping Stage 2 in with "not started."
+
+As before: this should land before or alongside the Stage 3 build prompt, not after. (Out of scope for this revision pass — this pass edits only this spec doc, not CLAUDE.md itself.)
 
 ## 9. Out of Scope (this spec)
 

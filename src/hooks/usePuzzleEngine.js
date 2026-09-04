@@ -60,6 +60,22 @@ export function usePuzzleEngine() {
   // otherwise close over a stale value. Same lifecycle as
   // hintUsedThisAttempt: set together, reset only in loadPuzzle.
   const hintUsedRef = useRef(false)
+  // Distinct from attemptCommittedRef: true from the moment the user makes
+  // their first real move attempt or hint press against the CURRENT puzzle
+  // instance, whether or not that interaction itself triggers a commit.
+  // Investigated during Sub-build B2a's gating-deadlock fix: no existing
+  // signal (attemptCommittedRef, hintUsedRef, isRetrying) captures this --
+  // all three either only flip at/after commit time, or (isRetrying) are
+  // only reachable once a commit has already happened. The gap this closes
+  // is real: on a multi-move puzzle, a correct-but-not-final move leaves
+  // the attempt genuinely "started, not yet committed" for however many
+  // moves remain (finishAttempt/commitAttempt only fire on the final move
+  // or a wrong move), which none of the other refs distinguish from a
+  // freshly-loaded, zero-interaction puzzle. Mirrored by attemptStarted
+  // state below for reactive consumers (e.g. App.jsx's launch-overlay
+  // gating) -- same pattern as hintUsedRef/hintUsedThisAttempt. Reset only
+  // in loadPuzzle, same lifecycle as attemptCommittedRef/hintUsedRef.
+  const attemptStartedRef = useRef(false)
 
   const [fen, setFen] = useState(null)
   // The position where solving begins (post opponent-setup-move) -- fixed
@@ -93,6 +109,11 @@ export function usePuzzleEngine() {
   // retryPuzzle (spec §9: hint-then-solve on any retry still reads
   // "Solved - hint used").
   const [hintUsedThisAttempt, setHintUsedThisAttempt] = useState(false)
+  // Reactive twin of attemptStartedRef -- see that ref's comment for what
+  // this does and doesn't mean. Consumed by App.jsx to gate the launch
+  // overlay's Create Account/Login on genuine in-flight interaction, not
+  // merely "a puzzle is loaded."
+  const [attemptStarted, setAttemptStarted] = useState(false)
 
   const advanceOpponentMove = useCallback(() => {
     const puzzle = puzzleRef.current
@@ -144,9 +165,11 @@ export function usePuzzleEngine() {
     puzzleRef.current = chosen
     attemptCommittedRef.current = false
     hintUsedRef.current = false
+    attemptStartedRef.current = false
     setIsRetrying(false)
     setHintTier(0)
     setHintUsedThisAttempt(false)
+    setAttemptStarted(false)
     setLastMove(null)
 
     // The stored FEN is the position before the opponent's setup move
@@ -224,6 +247,14 @@ export function usePuzzleEngine() {
     const expectedUci = puzzle.moves[plyRef.current]
     if (!expectedUci) return false
 
+    // A real move attempt against the current puzzle is being processed --
+    // mark interaction as started (see attemptStartedRef's comment). Set
+    // before the right/wrong branch below, since both branches count.
+    if (!attemptStartedRef.current) {
+      attemptStartedRef.current = true
+      setAttemptStarted(true)
+    }
+
     // react-chessboard's default promotion dialog (shown whenever a pawn
     // drops on the back rank) reports the piece the player actually chose
     // via this `piece` arg (e.g. "wN") — read the underpromotion straight
@@ -280,6 +311,10 @@ export function usePuzzleEngine() {
   // puzzle-finish, per spec §4.
   const pressHint = useCallback(() => {
     if (status !== 'solving') return
+    if (!attemptStartedRef.current) {
+      attemptStartedRef.current = true
+      setAttemptStarted(true)
+    }
     setHintTier((prev) => {
       if (prev === 0) {
         hintUsedRef.current = true
@@ -344,6 +379,7 @@ export function usePuzzleEngine() {
     hintPieceSquare,
     hintDestSquare,
     hintUsedThisAttempt,
+    attemptStarted,
     onUserMove,
     loadNextPuzzle: loadPuzzle,
     pressHint,

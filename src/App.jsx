@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
 import { getPreferences, savePreferences } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
+import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
+import LaunchOverlay    from './components/LaunchOverlay'
 import SettingsPanel    from './components/SettingsPanel'
 import Board            from './components/Board'
 import PuzzleControls   from './components/PuzzleControls'
@@ -17,6 +19,13 @@ const HEADLINES = {
   failed: 'Not quite',
   error: 'No puzzles available',
 }
+
+// Feature flag gating all of Stage 3's account/sync UI (backlog #1).
+// Default OFF: unset, or any value other than the literal string 'true',
+// disables it -- matches Vite's own env-var convention (values are always
+// strings; there is no boolean coercion). Set VITE_ENABLE_ACCOUNT_SYNC=true
+// in .env to enable locally.
+const ACCOUNT_SYNC_ENABLED = import.meta.env.VITE_ENABLE_ACCOUNT_SYNC === 'true'
 
 export default function App() {
   const {
@@ -35,6 +44,7 @@ export default function App() {
     hintPieceSquare,
     hintDestSquare,
     hintUsedThisAttempt,
+    attemptStarted,
     onUserMove,
     loadNextPuzzle,
     pressHint,
@@ -53,6 +63,39 @@ export default function App() {
   // flag flipping back to false) is the entire cleanup, so no other
   // transition needs to touch this.
   const [analyzeMode, setAnalyzeMode] = useState(false)
+
+  // Boot-time session check (Sub-build B1). Independent of the puzzle-load
+  // and preferences-load effects below -- runs in parallel, does not gate
+  // or delay either of them. 'disabled' (feature-flag off) is a distinct
+  // terminal state from 'checking' -- initialized directly from the flag,
+  // never transitioned into/out of, so it's honest about nothing being "in
+  // progress" when the flag is off (rather than parking at 'checking'
+  // forever). LaunchOverlay's render condition below only ever matches
+  // 'none', so 'disabled' keeps it unmounted the same way 'checking' does.
+  const [sessionStatus, setSessionStatus] = useState(ACCOUNT_SYNC_ENABLED ? 'checking' : 'disabled') // 'checking' | 'valid' | 'none' | 'disabled'
+  const [session, setSession] = useState(null)
+  // Guest tapped "Play as Guest" this page load -- keeps the overlay closed
+  // even though sessionStatus stays 'none' (Guest never establishes a
+  // session). Reset only by a fresh page load, same as sessionStatus itself.
+  const [launchDismissed, setLaunchDismissed] = useState(false)
+
+  useEffect(() => {
+    // Flag off: skip the call entirely -- not just hide its result. Zero
+    // Supabase network traffic on boot when Stage 3 is disabled.
+    if (!ACCOUNT_SYNC_ENABLED) return
+
+    let cancelled = false
+    supabase.auth.getSession().then(({ data }) => {
+      if (cancelled) return
+      if (data.session) {
+        setSession(data.session)
+        setSessionStatus('valid')
+      } else {
+        setSessionStatus('none')
+      }
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // On first mount: load persisted preferences. If app mode has never been
   // set, detect it from the OS once and persist that as the permanent
@@ -94,6 +137,21 @@ export default function App() {
     getPreferences().then((prefs) => savePreferences({ ...prefs, inputMode: mode }))
   }, [])
 
+  // Puzzle-in-progress gating (Sub-build B2a, corrected after the deadlock
+  // fix below). Login and Create Account are disabled only while a REAL
+  // in-flight write is possible -- not merely "a puzzle is loaded" (that
+  // first version deadlocked: the overlay's own backdrop blocks all board
+  // interaction, so a puzzle that gates from the moment it loads can never
+  // reach the commit that would un-gate it). The correct condition is
+  // "interaction has started on the current attempt AND it hasn't committed
+  // yet" -- a freshly-loaded, zero-interaction puzzle has nothing in flight
+  // to protect. `attemptStarted` (usePuzzleEngine.js) is the new signal
+  // added for this; `committed` mirrors the same reasoning as before (a
+  // commit has always already happened by the time status is
+  // 'solved'/'failed', or once hintUsedThisAttempt/isRetrying are true).
+  const puzzleAttemptCommitted = status === 'solved' || status === 'failed' || hintUsedThisAttempt || isRetrying
+  const puzzleAttemptInFlight = attemptStarted && !puzzleAttemptCommitted
+
   return (
     <div className="min-h-screen bg-bg text-fg flex flex-col">
 
@@ -102,6 +160,18 @@ export default function App() {
         onToggleMode={toggleAppMode}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+
+      {sessionStatus === 'none' && !launchDismissed && (
+        <LaunchOverlay
+          onGuest={() => setLaunchDismissed(true)}
+          onAuthenticated={(newSession) => {
+            setSession(newSession)
+            setSessionStatus('valid')
+            setLaunchDismissed(true)
+          }}
+          actionsDisabled={puzzleAttemptInFlight}
+        />
+      )}
 
       {settingsOpen && (
         <SettingsPanel

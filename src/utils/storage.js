@@ -224,3 +224,30 @@ export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRat
 
   return updated
 }
+
+/**
+ * Clears all local guest data back to first-run defaults: attempts and
+ * theme_stats emptied, profile and preferences reset to the same defaults
+ * a brand-new install would have (DEFAULT_PROFILE / DEFAULT_PREFERENCES --
+ * reusing the existing default-value constants rather than inventing new
+ * ones). Irreversible.
+ *
+ * Guest-to-account migration's Discard path (Sub-build B2b): called only
+ * after the user explicitly chooses to discard local history in favor of
+ * a newly-created, empty remote account -- this makes local state match
+ * that empty account exactly. Single readwrite transaction spanning all
+ * four stores so the reset is atomic (no possibility of, e.g., attempts
+ * clearing but preferences surviving on an interrupted write).
+ */
+export async function resetAllLocalData() {
+  const db = await openDB()
+  const t = tx(db, [STORE_PROFILE, STORE_ATTEMPTS, STORE_THEME_STATS, STORE_PREFERENCES], 'readwrite')
+  t.objectStore(STORE_PROFILE).put({ ...DEFAULT_PROFILE }, PROFILE_KEY)
+  t.objectStore(STORE_ATTEMPTS).clear()
+  t.objectStore(STORE_THEME_STATS).clear()
+  t.objectStore(STORE_PREFERENCES).put({ ...DEFAULT_PREFERENCES }, PREFERENCES_KEY)
+  return new Promise((resolve, reject) => {
+    t.oncomplete = () => resolve()
+    t.onerror = () => reject(t.error)
+  })
+}
