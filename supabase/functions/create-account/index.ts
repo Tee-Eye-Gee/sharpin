@@ -40,6 +40,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { mintSessionForProfile, syntheticEmailFor } from '../_shared/mint-session.ts'
+import { validateDisplayName } from '../_shared/validate-display-name.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -124,14 +125,25 @@ Deno.serve(async (req: Request) => {
   // wrong" reports -- see the diagnosis session for the reproduction.
   try {
     let moveSequenceHash: string
+    let displayNameRaw: unknown
     try {
       const body = await req.json()
       if (typeof body.moveSequenceHash !== 'string' || body.moveSequenceHash.length === 0) {
         throw new Error('missing moveSequenceHash')
       }
       moveSequenceHash = body.moveSequenceHash
+      displayNameRaw = body.displayName
     } catch {
       return jsonResponse({ error: 'invalid request body -- expected { moveSequenceHash: string }' }, 400)
+    }
+
+    // Optional -- validated the same way as update-profile (shared helper,
+    // spec's three checks: length, character set, profanity). Absent
+    // entirely is valid (spec: never required); a present-but-invalid value
+    // is its own distinct 400, separate from the body-shape check above.
+    const displayNameValidation = validateDisplayName(displayNameRaw)
+    if (!displayNameValidation.ok) {
+      return jsonResponse({ error: displayNameValidation.error }, 400)
     }
 
     // Service-role client: bypasses RLS by design, and is the only role
@@ -233,7 +245,7 @@ Deno.serve(async (req: Request) => {
     // --- Step 3: insert the profiles row ---
     const { error: profileInsertError } = await admin
       .from('profiles')
-      .insert({ id: newProfileId, move_sequence_hash: moveSequenceHash })
+      .insert({ id: newProfileId, move_sequence_hash: moveSequenceHash, display_name: displayNameValidation.value })
 
     if (profileInsertError) {
       // Roll back the just-created auth user so a failed create-account call
