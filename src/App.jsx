@@ -78,6 +78,12 @@ export default function App() {
   // even though sessionStatus stays 'none' (Guest never establishes a
   // session). Reset only by a fresh page load, same as sessionStatus itself.
   const [launchDismissed, setLaunchDismissed] = useState(false)
+  // The logged-in profile's display_name (spec:
+  // docs/specs/Sharpin_Spec_ProfileDisplayName.md) -- null covers both "not
+  // logged in yet" and "logged in, no name set", which is fine since
+  // SettingsPanel's Profile section only renders once sessionStatus is
+  // 'valid' anyway.
+  const [displayName, setDisplayName] = useState(null)
 
   useEffect(() => {
     // Flag off: skip the call entirely -- not just hide its result. Zero
@@ -96,6 +102,27 @@ export default function App() {
     })
     return () => { cancelled = true }
   }, [])
+
+  // Fetches the logged-in profile's display_name once a real session
+  // exists -- piggybacks on the session's own user id rather than a
+  // separate lookup call. Re-runs if `session` itself changes (e.g. a
+  // fresh Create Account/Login after this component's already mounted),
+  // not just on the sessionStatus transition, so a later login within the
+  // same page load still picks up the right row.
+  useEffect(() => {
+    if (sessionStatus !== 'valid' || !session) return
+    let cancelled = false
+    supabase
+      .from('profiles')
+      .select('display_name')
+      .eq('id', session.user.id)
+      .single()
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (!error) setDisplayName(data.display_name)
+      })
+    return () => { cancelled = true }
+  }, [sessionStatus, session])
 
   // On first mount: load persisted preferences. If app mode has never been
   // set, detect it from the OS once and persist that as the permanent
@@ -135,6 +162,25 @@ export default function App() {
   const selectInputMode = useCallback((mode) => {
     setInputMode(mode)
     getPreferences().then((prefs) => savePreferences({ ...prefs, inputMode: mode }))
+  }, [])
+
+  // Calls update-profile (server-side is the actual enforcement point for
+  // the spec's validation rules -- SettingsPanel's own client-side check is
+  // just immediate feedback, same two-layer design as Create Account).
+  // Returns { ok, error? } rather than throwing so SettingsPanel can show
+  // the specific rejection reason inline instead of a generic failure.
+  const saveDisplayName = useCallback(async (newName) => {
+    const { data, error } = await supabase.functions.invoke('update-profile', {
+      body: { displayName: newName },
+    })
+    if (error) {
+      const message = error.context?.status === 400
+        ? (await error.context.json().catch(() => null))?.error
+        : null
+      return { ok: false, error: message ?? 'Something went wrong -- try again.' }
+    }
+    setDisplayName(data.displayName)
+    return { ok: true }
   }, [])
 
   // Puzzle-in-progress gating (Sub-build B2a, corrected after the deadlock
@@ -181,6 +227,9 @@ export default function App() {
           inputMode={inputMode}
           onSelectInputMode={selectInputMode}
           onClose={() => setSettingsOpen(false)}
+          loggedIn={sessionStatus === 'valid'}
+          displayName={displayName}
+          onSaveDisplayName={saveDisplayName}
         />
       )}
 

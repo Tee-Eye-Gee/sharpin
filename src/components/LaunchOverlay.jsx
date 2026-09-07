@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { getAllAttempts, getThemeStats, getProfile, getPreferences, resetAllLocalData } from '../utils/storage'
+import { validateDisplayName } from '../utils/validateDisplayName'
 import SequenceBoardInput from './SequenceBoardInput'
 
 const VIEWS = { MENU: 'menu', LOGIN: 'login', CREATE: 'create', MIGRATION_PROMPT: 'migration_prompt' }
@@ -138,6 +139,12 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
   // this stage) and drives the "Working…" label.
   const [migrating, setMigrating] = useState(false)
   const [migrationError, setMigrationError] = useState('')
+  // Optional, entered alongside the sequence board on the Create Account
+  // view (spec: docs/specs/Sharpin_Spec_ProfileDisplayName.md). Validated
+  // live on every keystroke, same pattern as SettingsPanel's own copy --
+  // this is purely the "immediate try again" layer; the Edge Function's
+  // copy of these same checks is the actual enforcement point.
+  const [createDisplayName, setCreateDisplayName] = useState('')
 
   function resetFormState() {
     setError('')
@@ -180,8 +187,18 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
   async function handleCreateAccount(hash) {
     resetFormState()
     setSubmitting(true)
+
+    // An invalid display name never blocks the sequence board's own
+    // auto-submit (Sharpin_Spec_SequenceInput.md: no confirm step, fires
+    // immediately on the 4th drag) -- it's optional, so an invalid entry
+    // simply doesn't get sent, same outcome as never having typed one. The
+    // input's own live validation (Create view below) already tells the
+    // user why, so there's nothing more to say about it here.
+    const nameValidation = validateDisplayName(createDisplayName.trim())
+    const displayNameToSend = nameValidation.ok ? nameValidation.value : null
+
     const { data, error: invokeError } = await supabase.functions.invoke('create-account', {
-      body: { moveSequenceHash: hash },
+      body: { moveSequenceHash: hash, displayName: displayNameToSend },
     })
 
     if (invokeError) {
@@ -246,6 +263,15 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
     onAuthenticated(pendingSession)
   }
 
+  // Live, on every keystroke -- same "immediate try again" layer as
+  // SettingsPanel's own Profile section. Empty input shows no error at all
+  // (a not-yet-typed optional field isn't invalid).
+  const createDisplayNameTrimmed = createDisplayName.trim()
+  const createDisplayNameValidation = validateDisplayName(createDisplayNameTrimmed)
+  const createDisplayNameError = createDisplayNameTrimmed && !createDisplayNameValidation.ok
+    ? createDisplayNameValidation.error
+    : ''
+
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/40" />
@@ -305,6 +331,23 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
           {view === VIEWS.CREATE && (
             <div className="flex flex-col gap-3">
               <p className="text-xs text-fg-muted">Choose a permanent 4-move sequence for your new account.</p>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-xs text-fg-muted" htmlFor="create-display-name">
+                  Display name (optional)
+                </label>
+                <input
+                  id="create-display-name"
+                  type="text"
+                  value={createDisplayName}
+                  onChange={(e) => setCreateDisplayName(e.target.value)}
+                  disabled={submitting || rateLimited}
+                  placeholder="e.g. ChessFan42"
+                  className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:border-accent disabled:opacity-50"
+                />
+                {createDisplayNameError && <p className="text-xs text-red-400">{createDisplayNameError}</p>}
+              </div>
+
               <SequenceBoardInput
                 onSequenceComplete={handleCreateAccount}
                 disabled={submitting || rateLimited}
