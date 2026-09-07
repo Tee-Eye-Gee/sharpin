@@ -1,57 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { getAllAttempts, getThemeStats, getProfile, getPreferences, resetAllLocalData } from '../utils/storage'
-
-// TEMPORARY PLACEHOLDER (Sub-build B2a): the real 4-move identity input is a
-// board-gesture capture -- drag/tap out 4 arbitrary moves, no chess-legality
-// checking -- which is a genuinely new component needing its own dedicated
-// design pass (deliberately out of scope here). This plain text/token field
-// exists only to unblock Login/Create Account's request plumbing for this
-// pass. Swap boundary: `onSequenceComplete(hash)` is the entire contract the
-// rest of this file depends on -- the real gesture-capture component can
-// replace this one's internals (or the whole component) later without
-// touching LaunchOverlay's Login/Create Account handlers, App.jsx, or
-// anything else.
-async function hashSequence(raw) {
-  const data = new TextEncoder().encode(raw)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function SequenceInputPlaceholder({ onSequenceComplete, disabled, submitLabel }) {
-  const [value, setValue] = useState('')
-  const [hashing, setHashing] = useState(false)
-
-  async function handleSubmit(e) {
-    e.preventDefault()
-    if (!value.trim() || hashing) return
-    setHashing(true)
-    const hash = await hashSequence(value.trim())
-    setHashing(false)
-    onSequenceComplete(hash)
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        disabled={disabled || hashing}
-        placeholder="e2e4 e7e5 g1f3 b8c6"
-        aria-label="4-move sequence"
-        className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:border-accent disabled:opacity-50"
-      />
-      <button
-        type="submit"
-        disabled={disabled || hashing || !value.trim()}
-        className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-sm font-medium text-accent transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {hashing ? 'Working…' : submitLabel}
-      </button>
-    </form>
-  )
-}
+import SequenceBoardInput from './SequenceBoardInput'
 
 const VIEWS = { MENU: 'menu', LOGIN: 'login', CREATE: 'create', MIGRATION_PROMPT: 'migration_prompt' }
 
@@ -344,7 +294,7 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
           {view === VIEWS.LOGIN && (
             <div className="flex flex-col gap-3">
               <p className="text-xs text-fg-muted">Enter your 4-move sequence to log in.</p>
-              <SequenceInputPlaceholder onSequenceComplete={handleLogin} disabled={submitting} submitLabel="Login" />
+              <SequenceBoardInput onSequenceComplete={handleLogin} disabled={submitting} />
               {error && <p className="text-xs text-red-400">{error}</p>}
               <button onClick={backToMenu} className="text-xs text-fg-muted hover:text-fg underline text-center">
                 Back
@@ -355,10 +305,9 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
           {view === VIEWS.CREATE && (
             <div className="flex flex-col gap-3">
               <p className="text-xs text-fg-muted">Choose a permanent 4-move sequence for your new account.</p>
-              <SequenceInputPlaceholder
+              <SequenceBoardInput
                 onSequenceComplete={handleCreateAccount}
                 disabled={submitting || rateLimited}
-                submitLabel="Create Account"
               />
               {error && <p className="text-xs text-red-400">{error}</p>}
               {rateLimited && <p className="text-xs text-red-400">Too many attempts -- try again later.</p>}
