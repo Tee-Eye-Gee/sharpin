@@ -123,7 +123,7 @@ async function migrateGuestDataToAccount(userId) {
  *   disabled in that case (Guest is never affected). See App.jsx for the
  *   derivation.
  */
-export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisabled }) {
+export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisabled, boardTheme }) {
   const [view, setView] = useState(VIEWS.MENU)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -294,7 +294,7 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
           {view === VIEWS.LOGIN && (
             <div className="flex flex-col gap-3">
               <p className="text-xs text-fg-muted">Enter your 4-move sequence to log in.</p>
-              <SequenceBoardInput onSequenceComplete={handleLogin} disabled={submitting} />
+              <SequenceBoardInput onSequenceComplete={handleLogin} disabled={submitting} boardTheme={boardTheme} />
               {error && <p className="text-xs text-red-400">{error}</p>}
               <button onClick={backToMenu} className="text-xs text-fg-muted hover:text-fg underline text-center">
                 Back
@@ -308,6 +308,7 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
               <SequenceBoardInput
                 onSequenceComplete={handleCreateAccount}
                 disabled={submitting || rateLimited}
+                boardTheme={boardTheme}
               />
               {error && <p className="text-xs text-red-400">{error}</p>}
               {rateLimited && <p className="text-xs text-red-400">Too many attempts -- try again later.</p>}

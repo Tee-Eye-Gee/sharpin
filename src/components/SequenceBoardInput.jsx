@@ -8,12 +8,6 @@ import { BOARD_THEMES, DEFAULT_BOARD_THEME } from '../utils/theme'
 // docs/specs/Sharpin_Spec_SequenceInput.md §2.
 const START_FEN = 'rnb1kb1r/p2p1ppp/5n2/1p3Nq1/4PpP1/3P4/PPP4P/RNBQ1KR1 w kq - 0 12'
 const SEQUENCE_LENGTH = 4
-// Board.jsx's own square colors track the user's selected board theme
-// (Settings > Board Theme); LaunchOverlay doesn't receive that preference,
-// so this reuses the same default ('tournament') Board.jsx falls back to --
-// matches the puzzle board for a guest/first-time user, but won't track a
-// live theme switch since there's no preference wired in here.
-const { light: BOARD_LIGHT, dark: BOARD_DARK } = BOARD_THEMES[DEFAULT_BOARD_THEME]
 
 // react-chessboard doesn't export a FEN parser from its package root (only
 // Chessboard/ChessboardDnDProvider/SparePiece are, per node_modules/
@@ -70,8 +64,11 @@ async function hashSequence(raw) {
  *   upstream, or the flow is otherwise gated (e.g. rate-limited) -- board
  *   and Back/Reset are inert, same intent as the old placeholder's
  *   `disabled` prop.
+ * @param {string} [props.boardTheme] - the user's selected board theme id
+ *   (Settings > Board Theme), same value App.jsx passes to Board.jsx.
  */
-export default function SequenceBoardInput({ onSequenceComplete, disabled }) {
+export default function SequenceBoardInput({ onSequenceComplete, disabled, boardTheme }) {
+  const { light: lightSquare, dark: darkSquare } = BOARD_THEMES[boardTheme] ?? BOARD_THEMES[DEFAULT_BOARD_THEME]
   const [positions, setPositions] = useState([START_POSITION])
   const [moves, setMoves] = useState([])
   // True from the moment the 4th drag has fired onSequenceComplete. Distinct
@@ -156,8 +153,8 @@ export default function SequenceBoardInput({ onSequenceComplete, disabled }) {
         boardOrientation="white"
         arePiecesDraggable={canInteract}
         animationDuration={200}
-        customLightSquareStyle={{ backgroundColor: BOARD_LIGHT }}
-        customDarkSquareStyle={{ backgroundColor: BOARD_DARK }}
+        customLightSquareStyle={{ backgroundColor: lightSquare }}
+        customDarkSquareStyle={{ backgroundColor: darkSquare }}
       />
 
       {showCorrectionControls && (

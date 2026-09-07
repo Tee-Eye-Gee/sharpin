@@ -170,6 +170,7 @@ export default function App() {
             setLaunchDismissed(true)
           }}
           actionsDisabled={puzzleAttemptInFlight}
+          boardTheme={boardTheme}
         />
       )}
 
