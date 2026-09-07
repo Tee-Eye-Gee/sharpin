@@ -96,86 +96,105 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: 'method not allowed' }, 405)
   }
 
-  let moveSequenceHash: string
+  // Everything below is wrapped so that ANY uncaught exception (a transient
+  // network-level failure inside one of the awaited supabase-js calls, not
+  // just their own recognized `{error}` results) still exits through
+  // jsonResponse() and therefore still carries corsHeaders. Without this,
+  // Deno.serve's own default uncaught-exception response bypasses
+  // jsonResponse() entirely and carries no custom headers at all -- which
+  // browsers report as an opaque CORS failure (no status, no body visible
+  // to the caller) rather than a real 500 the client can branch on. Same
+  // fix as create-account/index.ts, applied here too since this function
+  // has the identical structure and shares mintSessionForProfile.
   try {
-    const body = await req.json()
-    if (typeof body.moveSequenceHash !== 'string' || body.moveSequenceHash.length === 0) {
-      throw new Error('missing moveSequenceHash')
+    let moveSequenceHash: string
+    try {
+      const body = await req.json()
+      if (typeof body.moveSequenceHash !== 'string' || body.moveSequenceHash.length === 0) {
+        throw new Error('missing moveSequenceHash')
+      }
+      moveSequenceHash = body.moveSequenceHash
+    } catch {
+      return jsonResponse({ error: 'invalid request body -- expected { moveSequenceHash: string }' }, 400)
     }
-    moveSequenceHash = body.moveSequenceHash
-  } catch {
-    return jsonResponse({ error: 'invalid request body -- expected { moveSequenceHash: string }' }, 400)
+
+    // Service-role client: bypasses RLS by design (service_role carries
+    // BYPASSRLS). This is the only thing in the system allowed to read
+    // across all profiles rows (and to read/write verify_attempts, which has
+    // no policies at all -- see that migration), which is exactly what's
+    // needed here: the caller isn't authenticated as any particular profile
+    // yet.
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+
+    // --- Rate limit: every call counts, match or not, before any hash work happens ---
+    const clientIp = getClientIp(req)
+    const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString()
+
+    const { count: recentAttempts, error: countError } = await admin
+      .from('verify_attempts')
+      .select('id', { count: 'exact', head: true })
+      .eq('ip_address', clientIp)
+      .gte('attempted_at', windowStart)
+
+    if (countError) {
+      // Fail closed: if the throttle itself can't be checked, don't proceed
+      // as though it passed.
+      return jsonResponse({ error: 'rate limit check failed' }, 500)
+    }
+
+    if ((recentAttempts ?? 0) >= RATE_LIMIT_MAX_ATTEMPTS) {
+      // Deliberately does NOT insert a verify_attempts row here -- this call
+      // never reaches the hash lookup, so it shouldn't count as a "real"
+      // attempt either. Rows already in the window are what's enforcing the
+      // block; not adding more here keeps this a genuine sliding window
+      // (capacity frees up as old rows age out) instead of a counter an
+      // attacker can push further out just by continuing to hammer it.
+      return jsonResponse({ error: 'too many attempts, try again later' }, 429)
+    }
+
+    const { error: recordError } = await admin.from('verify_attempts').insert({ ip_address: clientIp })
+
+    if (recordError) {
+      // Fail closed here too: if this attempt can't be recorded, don't let it
+      // slip through uncounted.
+      return jsonResponse({ error: 'rate limit check failed' }, 500)
+    }
+
+    // --- Existing hash lookup logic, unchanged below this point ---
+
+    // Only the hash is ever compared. This is the only query in this
+    // function that touches move_sequence_hash, and its result (found or
+    // not) is the only thing that gets logged implicitly via the response --
+    // nothing here writes the raw sequence or the hash to any log.
+    const { data: profile, error: lookupError } = await admin
+      .from('profiles')
+      .select('id')
+      .eq('move_sequence_hash', moveSequenceHash)
+      .maybeSingle()
+
+    if (lookupError) {
+      return jsonResponse({ error: 'lookup failed' }, 500)
+    }
+
+    if (!profile) {
+      return jsonResponse({ match: false }, 200)
+    }
+
+    const minted = await mintSessionForProfile(admin, profile.id)
+
+    if (!minted.ok) {
+      return jsonResponse({ error: minted.error }, 500)
+    }
+
+    return jsonResponse({ match: true, session: minted.session }, 200)
+  } catch (err) {
+    // Last-resort catch-all: guarantees corsHeaders even on a genuinely
+    // unexpected exception. Never leaks exception internals to the client,
+    // same posture as every other 500 branch above -- logged server-side
+    // only, for whoever's checking the function's logs later.
+    console.error('unhandled exception in verify-move-sequence:', err)
+    return jsonResponse({ error: 'internal error' }, 500)
   }
-
-  // Service-role client: bypasses RLS by design (service_role carries
-  // BYPASSRLS). This is the only thing in the system allowed to read
-  // across all profiles rows (and to read/write verify_attempts, which has
-  // no policies at all -- see that migration), which is exactly what's
-  // needed here: the caller isn't authenticated as any particular profile
-  // yet.
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
-
-  // --- Rate limit: every call counts, match or not, before any hash work happens ---
-  const clientIp = getClientIp(req)
-  const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString()
-
-  const { count: recentAttempts, error: countError } = await admin
-    .from('verify_attempts')
-    .select('id', { count: 'exact', head: true })
-    .eq('ip_address', clientIp)
-    .gte('attempted_at', windowStart)
-
-  if (countError) {
-    // Fail closed: if the throttle itself can't be checked, don't proceed
-    // as though it passed.
-    return jsonResponse({ error: 'rate limit check failed' }, 500)
-  }
-
-  if ((recentAttempts ?? 0) >= RATE_LIMIT_MAX_ATTEMPTS) {
-    // Deliberately does NOT insert a verify_attempts row here -- this call
-    // never reaches the hash lookup, so it shouldn't count as a "real"
-    // attempt either. Rows already in the window are what's enforcing the
-    // block; not adding more here keeps this a genuine sliding window
-    // (capacity frees up as old rows age out) instead of a counter an
-    // attacker can push further out just by continuing to hammer it.
-    return jsonResponse({ error: 'too many attempts, try again later' }, 429)
-  }
-
-  const { error: recordError } = await admin.from('verify_attempts').insert({ ip_address: clientIp })
-
-  if (recordError) {
-    // Fail closed here too: if this attempt can't be recorded, don't let it
-    // slip through uncounted.
-    return jsonResponse({ error: 'rate limit check failed' }, 500)
-  }
-
-  // --- Existing hash lookup logic, unchanged below this point ---
-
-  // Only the hash is ever compared. This is the only query in this
-  // function that touches move_sequence_hash, and its result (found or
-  // not) is the only thing that gets logged implicitly via the response --
-  // nothing here writes the raw sequence or the hash to any log.
-  const { data: profile, error: lookupError } = await admin
-    .from('profiles')
-    .select('id')
-    .eq('move_sequence_hash', moveSequenceHash)
-    .maybeSingle()
-
-  if (lookupError) {
-    return jsonResponse({ error: 'lookup failed' }, 500)
-  }
-
-  if (!profile) {
-    return jsonResponse({ match: false }, 200)
-  }
-
-  const minted = await mintSessionForProfile(admin, profile.id)
-
-  if (!minted.ok) {
-    return jsonResponse({ error: minted.error }, 500)
-  }
-
-  return jsonResponse({ match: true, session: minted.session }, 200)
 })
