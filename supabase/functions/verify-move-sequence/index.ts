@@ -39,6 +39,18 @@ const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
 // all, failing closed rather than falling back to "*").
 const ALLOWED_ORIGINS_ENV = 'ALLOWED_ORIGINS'
 
+// Vite's dev server silently increments to the next free port whenever its
+// default (5173) is occupied -- confirmed to actually happen mid-session
+// (a stray process left over from an earlier restart), not just a
+// hypothetical. Matching any loopback port here, rather than adding one
+// more exact port to ALLOWED_ORIGINS, is what actually stops this from
+// recurring: production is untouched (still the exact-match list below,
+// unchanged), and reaching a `localhost` origin at all already requires
+// code running on the same machine, so this isn't loosening the boundary
+// that matters. Same fix as create-account/index.ts, applied here too since
+// this function has the identical CORS logic.
+const LOCALHOST_ORIGIN_PATTERN = /^http:\/\/localhost:\d+$/
+
 function buildCorsHeaders(req: Request): Record<string, string> {
   const allowedOrigins = (Deno.env.get(ALLOWED_ORIGINS_ENV) ?? '')
     .split(',')
@@ -52,7 +64,7 @@ function buildCorsHeaders(req: Request): Record<string, string> {
   }
 
   const requestOrigin = req.headers.get('origin')
-  if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
+  if (requestOrigin && (allowedOrigins.includes(requestOrigin) || LOCALHOST_ORIGIN_PATTERN.test(requestOrigin))) {
     headers['Access-Control-Allow-Origin'] = requestOrigin
   }
   // No match (or no Origin header at all, e.g. a non-browser caller) ->
