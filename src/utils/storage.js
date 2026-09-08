@@ -87,6 +87,7 @@ const DEFAULT_PREFERENCES = {
   appMode: null, // null until first OS-detection; then persisted and never re-detected
   boardTheme: 'tournament',
   inputMode: 'drag', // preserves current behavior for existing users until they opt into tap
+  lastPulledAt: null, // ISO string watermark for pullRemoteAttempts; null means "never pulled"
 }
 
 /**
@@ -306,6 +307,87 @@ export async function flushUnsyncedAttempts() {
   for (const attempt of unsynced) {
     await pushAttemptIfPossible(attempt)
   }
+}
+
+/**
+ * Pulls any remote puzzle_attempts rows not yet reflected locally since the
+ * last successful pull, and bulk-inserts them into the local attempts store.
+ *
+ * Watermark column is `updated_at`, not `attempted_at`. attempted_at is
+ * client-set at solve time; a delayed flushUnsyncedAttempts retry (Commit 1)
+ * can insert a row whose attempted_at is well before a watermark that has
+ * already advanced past it, silently skipping that row forever. updated_at
+ * is server-set via puzzle_attempts_set_updated_at (`before insert or
+ * update`, stamps now()) -- confirmed by reading the schema directly, this
+ * column already exists for exactly this purpose (its own migration comment
+ * calls it "the server-set LWW conflict-resolution timestamp"), and no
+ * client code path ever UPDATEs a puzzle_attempts row after insert, so it
+ * behaves as a pure insertion timestamp in practice. No new migration was
+ * needed.
+ *
+ * Dedupes fetched rows against remoteIds already present locally before
+ * inserting -- required, not just defensive: a row this same device already
+ * pushed (Commit 1) can still fall after the last pull's watermark and
+ * reappear in this query. Without the dedupe it would be inserted a second
+ * time under a new local autoincrement key.
+ *
+ * Every inserted row is written with synced: true immediately -- an
+ * unflagged pulled row risks being swept into flushUnsyncedAttempts and
+ * causing a duplicate-key (23505) conflict on re-push.
+ *
+ * Not wired to any trigger yet (Commit 4 wires this into the login/
+ * foreground sequence).
+ */
+export async function pullRemoteAttempts() {
+  if (!ACCOUNT_SYNC_ENABLED) return { pulled: 0 }
+
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) return { pulled: 0 }
+
+  const prefs = await getPreferences()
+  const watermark = prefs.lastPulledAt ?? '1970-01-01T00:00:00.000Z'
+
+  const { data, error } = await supabase
+    .from('puzzle_attempts')
+    .select('id, puzzle_id, themes, solved, hint_used, rating_delta, time_taken_ms, attempted_at')
+    .eq('profile_id', session.user.id)
+    .gt('updated_at', watermark)
+
+  if (error) return { pulled: 0 }
+
+  const existingRemoteIds = new Set((await getAllAttempts()).map((a) => a.remoteId))
+  const newRows = (data ?? []).filter((row) => !existingRemoteIds.has(row.id))
+
+  if (newRows.length > 0) {
+    const db = await openDB()
+    const t = tx(db, [STORE_ATTEMPTS], 'readwrite')
+    const store = t.objectStore(STORE_ATTEMPTS)
+    for (const row of newRows) {
+      store.add({
+        puzzleId: row.puzzle_id,
+        themes: row.themes,
+        solved: row.solved,
+        hintUsed: row.hint_used,
+        ratingDelta: row.rating_delta,
+        timeTakenMs: row.time_taken_ms,
+        at: new Date(row.attempted_at).getTime(),
+        synced: true,
+        remoteId: row.id,
+      })
+    }
+    await new Promise((resolve, reject) => {
+      t.oncomplete = () => resolve()
+      t.onerror = () => reject(t.error)
+    })
+  }
+
+  // Per spec: advance to the client's current time, not the max row
+  // timestamp pulled -- simpler, at the cost of a theoretical clock-skew
+  // edge case (flagged to the user; low-risk given the already-locked
+  // "sequential device usage, no concurrent cross-device writes" scope).
+  await savePreferences({ ...prefs, lastPulledAt: new Date().toISOString() })
+
+  return { pulled: newRows.length }
 }
 
 /**
