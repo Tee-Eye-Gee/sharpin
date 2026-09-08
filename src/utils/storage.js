@@ -349,14 +349,20 @@ export async function pullRemoteAttempts() {
 
   const { data, error } = await supabase
     .from('puzzle_attempts')
-    .select('id, puzzle_id, themes, solved, hint_used, rating_delta, time_taken_ms, attempted_at')
+    .select('id, puzzle_id, themes, solved, hint_used, rating_delta, time_taken_ms, attempted_at, updated_at')
     .eq('profile_id', session.user.id)
     .gt('updated_at', watermark)
 
   if (error) return { pulled: 0 }
+  // Nothing to advance past -- leave last_pulled_at untouched rather than
+  // re-stamping it to "now": with no rows to anchor to, that would risk
+  // skipping ahead of a row committed server-side after this query ran but
+  // before the watermark write, the same class of race this design exists
+  // to avoid on the push side.
+  if (data.length === 0) return { pulled: 0 }
 
   const existingRemoteIds = new Set((await getAllAttempts()).map((a) => a.remoteId))
-  const newRows = (data ?? []).filter((row) => !existingRemoteIds.has(row.id))
+  const newRows = data.filter((row) => !existingRemoteIds.has(row.id))
 
   if (newRows.length > 0) {
     const db = await openDB()
@@ -381,11 +387,18 @@ export async function pullRemoteAttempts() {
     })
   }
 
-  // Per spec: advance to the client's current time, not the max row
-  // timestamp pulled -- simpler, at the cost of a theoretical clock-skew
-  // edge case (flagged to the user; low-risk given the already-locked
-  // "sequential device usage, no concurrent cross-device writes" scope).
-  await savePreferences({ ...prefs, lastPulledAt: new Date().toISOString() })
+  // Advance to the max updated_at among rows the query actually returned --
+  // not the client's current time. Anchoring to a value the server itself
+  // already committed closes the race where a row lands between this
+  // query running and the watermark being set: that row's updated_at is
+  // necessarily > any value in `data`, so it stays > the new watermark and
+  // will be picked up by the next pull, instead of being silently skipped
+  // forever. Computed from `data` (every row the query matched), not
+  // `newRows` (post-dedupe) -- a self-pull that returns rows this device
+  // already has locally still legitimately confirms the server state up to
+  // those rows' timestamps.
+  const maxUpdatedAt = data.reduce((max, row) => (row.updated_at > max ? row.updated_at : max), data[0].updated_at)
+  await savePreferences({ ...prefs, lastPulledAt: maxUpdatedAt })
 
   return { pulled: newRows.length }
 }
