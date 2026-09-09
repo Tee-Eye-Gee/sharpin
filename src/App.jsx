@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { getPreferences, savePreferences } from './utils/storage'
+import { getPreferences, savePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -123,6 +123,60 @@ export default function App() {
       })
     return () => { cancelled = true }
   }, [sessionStatus, session])
+
+  // Ongoing sync (backlog #1 continuation, Commit 4): pull -> flush -> recompute,
+  // run on both login and foreground/resume. A ref-based lock, not just the
+  // event semantics below, is what actually prevents a double-run if both
+  // triggers land close together (e.g. the boot session-restore resolving
+  // right as a visibilitychange fires) -- relying solely on "visibilitychange
+  // doesn't fire on initial mount" would be correct in the common case but
+  // isn't guaranteed across every browser/bfcache-restore scenario, so the
+  // lock is the real guarantee, not an assumption.
+  const syncInFlightRef = useRef(false)
+
+  const runSyncSequence = useCallback(async () => {
+    if (!ACCOUNT_SYNC_ENABLED) return
+    if (syncInFlightRef.current) return
+    syncInFlightRef.current = true
+    try {
+      await pullRemoteAttempts()
+      await flushUnsyncedAttempts()
+      await supabase.rpc('recompute_stats')
+    } catch {
+      // Best-effort background sync -- must never surface to the user or
+      // block puzzle-board interaction. The next login/foreground trigger
+      // retries the whole sequence from scratch.
+    } finally {
+      syncInFlightRef.current = false
+    }
+  }, [])
+
+  // Login trigger: fires whenever sessionStatus transitions to 'valid' --
+  // covers BOTH the boot-time session-restore effect above (an existing
+  // session found on load) and an interactive Login/Create Account within
+  // this same page load (onAuthenticated below), since both paths funnel
+  // through the same setSessionStatus('valid') call. This is deliberately
+  // the same trigger condition as the displayName-fetch effect above.
+  useEffect(() => {
+    if (sessionStatus !== 'valid' || !session) return
+    runSyncSequence()
+  }, [sessionStatus, session, runSyncSequence])
+
+  // Foreground/resume trigger: Page Visibility API, not a continuous poll.
+  // visibilitychange only fires on an actual state transition, never for
+  // the tab's initial state at mount -- so on a normal first load this
+  // effect registers a listener but does not itself invoke runSyncSequence,
+  // leaving the login trigger above as the sole first-load trigger (the
+  // syncInFlightRef lock above is the actual backstop against any
+  // browser-specific exception to that).
+  useEffect(() => {
+    if (sessionStatus !== 'valid' || !session) return
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') runSyncSequence()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [sessionStatus, session, runSyncSequence])
 
   // On first mount: load persisted preferences. If app mode has never been
   // set, detect it from the OS once and persist that as the permanent
