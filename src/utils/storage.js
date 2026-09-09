@@ -229,9 +229,17 @@ async function appendAttempt(db, attempt) {
 }
 
 /**
- * Marks a locally-stored attempt as pushed to puzzle_attempts. Keyed by the
- * local store id (appendAttempt's own return value / each getUnsyncedAttempts
- * record's `.id`), not the row's `remoteId`.
+ * Marks locally-stored attempts as pushed to puzzle_attempts, in one
+ * transaction. Keyed by each entry's `id` (the local store id --
+ * appendAttempt's own return value / each getUnsyncedAttempts record's
+ * `.id`), not `remoteId`. `remoteId` is optional per entry and, when given,
+ * is written back onto the local record too -- needed by
+ * migrateGuestDataToAccount (LaunchOverlay.jsx), which may have to generate
+ * a fresh remoteId for a pre-Commit-1 local record that predates that
+ * field; without persisting it back, that record's local remoteId would
+ * stay out of sync with the row actually created remotely, and a later
+ * pullRemoteAttempts() dedupe check (which matches on remoteId) would fail
+ * to recognize that remote row as already-covered and insert a duplicate.
  *
  * STORE_ATTEMPTS is an in-line-keyed store ({ keyPath: 'id', autoIncrement:
  * true }) -- unlike the other three stores (out-of-line, no keyPath), its
@@ -240,16 +248,23 @@ async function appendAttempt(db, attempt) {
  * out-of-line stores) -- the key is derived from the object's own `id`
  * field, which `existing` already carries from the read below.
  */
-async function markAttemptSynced(localId) {
+export async function markAttemptsSynced(entries) {
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readwrite')
   const store = t.objectStore(STORE_ATTEMPTS)
-  const existing = await reqToPromise(store.get(localId))
-  if (existing) store.put({ ...existing, synced: true })
+  for (const { id, remoteId } of entries) {
+    const existing = await reqToPromise(store.get(id))
+    if (!existing) continue
+    store.put({ ...existing, remoteId: remoteId ?? existing.remoteId, synced: true })
+  }
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
   })
+}
+
+async function markAttemptSynced(localId, remoteId) {
+  return markAttemptsSynced([{ id: localId, remoteId }])
 }
 
 /**
@@ -287,7 +302,7 @@ async function pushAttemptIfPossible(attempt) {
   })
 
   if (!error || error.code === '23505') {
-    await markAttemptSynced(attempt.id)
+    await markAttemptSynced(attempt.id, attempt.remoteId)
   }
   // Any other error: leave synced:false: flushUnsyncedAttempts retries it later.
 }

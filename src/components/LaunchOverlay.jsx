@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
-import { getAllAttempts, getThemeStats, getProfile, getPreferences, resetAllLocalData } from '../utils/storage'
+import { getAllAttempts, getPreferences, markAttemptsSynced, resetAllLocalData } from '../utils/storage'
 import { validateDisplayName } from '../utils/validateDisplayName'
 import SequenceBoardInput from './SequenceBoardInput'
 
@@ -8,27 +8,44 @@ const VIEWS = { MENU: 'menu', LOGIN: 'login', CREATE: 'create', MIGRATION_PROMPT
 
 // Guest-to-account migration (Sub-build B2b, spec §5's "Guest -> account
 // migration" -- one-time historical transfer at account creation only, NOT
-// ongoing sync; no future-attempt push logic here or anywhere yet). Runs
-// after Create Account has already minted a real, authenticated session, so
-// RLS (profile_id = auth.uid()) is what actually enforces every write below
-// can only ever touch this new account's own rows -- these are plain
-// supabase-js table calls, no Edge Function, confirmed viable against the
-// live RLS policies during the B2b investigation pass.
+// ongoing sync; a logged-in account's later attempts are pushed by
+// storage.js's own recordAttempt/flushUnsyncedAttempts, wired to the login/
+// foreground sequence in App.jsx). Runs after Create Account has already
+// minted a real, authenticated session, so RLS (profile_id = auth.uid()) is
+// what actually enforces every write below can only ever touch this new
+// account's own rows -- these are plain supabase-js table calls, no Edge
+// Function, confirmed viable against the live RLS policies during the B2b
+// investigation pass.
 //
-// Write order: puzzle_attempts -> theme_stats -> profile_stats ->
-// preferences. Retry-safe by construction, not by assumption:
-// theme_stats/profile_stats/preferences are all upserts keyed on their real
-// remote PKs (profile_id[,theme]), so re-running them with the same
-// locally-sourced values is naturally idempotent. puzzle_attempts has no
-// such natural key (a fresh crypto.randomUUID() is generated per row, since
-// investigation confirmed nothing else references these ids) -- so a blind
-// retry could duplicate rows already landed by an earlier partial attempt.
+// Write order: puzzle_attempts -> recompute_stats() -> preferences.
+// profile_stats/theme_stats are no longer written directly here (Commit 6,
+// ongoing sync) -- recompute_stats() (Commit 3) is the only path allowed to
+// write them going forward, and it's called unconditionally, on both the
+// fresh-migration branch below AND the already-migrated-retry branch,
+// since a retry that skips re-inserting attempts must still ensure stats
+// get computed at least once.
+//
+// Each row's id is that local attempt's own `remoteId` (generated once, at
+// record-time, in recordAttempt -- see storage.js), not a fresh uuid
+// minted here. This is what makes puzzle_attempts retry-safe: re-running
+// this function with the same local data reuses the same ids, so a retried
+// insert against rows that already landed hits 23505 (unique violation),
+// not a duplicate row. A pre-Commit-1 local record predating the
+// remoteId field falls back to a freshly generated one here, which is
+// then persisted back onto the local record via markAttemptsSynced (not
+// just marking it synced) -- otherwise that local record's remoteId would
+// permanently disagree with the row actually created remotely, and a
+// later pullRemoteAttempts() dedupe check (which matches on remoteId)
+// would fail to recognize it as already-covered.
+//
 // The pre-check below (also serving as the locked decision's "confirm the
-// empty-remote assumption at runtime" requirement) handles both concerns
-// with the same read: if puzzle_attempts already has rows for this
-// profile, either this is a resumed retry (skip re-inserting, move on) or
-// a genuinely unexpected pre-existing-data edge case (same safe response
-// either way -- never append/duplicate).
+// empty-remote assumption at runtime" requirement) still decides whether
+// to attempt the insert at all: if puzzle_attempts already has rows for
+// this profile, either this is a resumed retry (skip re-inserting, move
+// on -- any leftover locally-unsynced records among them self-heal via the
+// login/foreground flush's own 23505-as-success handling, not duplicated
+// here) or a genuinely unexpected pre-existing-data edge case (same safe
+// response either way -- never append/duplicate).
 //
 // True multi-table atomicity isn't achievable from separate client-side
 // calls without an Edge Function wrapping them in one Postgres transaction
@@ -51,8 +68,12 @@ async function migrateGuestDataToAccount(userId) {
   if (!existingRemoteAttempts) {
     const localAttempts = await getAllAttempts()
     if (localAttempts.length > 0) {
-      const rows = localAttempts.map((a) => ({
-        id: crypto.randomUUID(),
+      const attemptsWithRemoteId = localAttempts.map((a) => ({
+        ...a,
+        remoteId: a.remoteId ?? crypto.randomUUID(),
+      }))
+      const rows = attemptsWithRemoteId.map((a) => ({
+        id: a.remoteId,
         profile_id: userId,
         puzzle_id: a.puzzleId,
         themes: a.themes,
@@ -64,36 +85,13 @@ async function migrateGuestDataToAccount(userId) {
       }))
       const { error: attemptsError } = await supabase.from('puzzle_attempts').insert(rows)
       if (attemptsError) throw new Error('puzzle_attempts write failed')
+
+      await markAttemptsSynced(attemptsWithRemoteId.map((a) => ({ id: a.id, remoteId: a.remoteId })))
     }
   }
 
-  const themeStatsObj = await getThemeStats()
-  const themeRows = Object.entries(themeStatsObj).map(([theme, s]) => ({
-    profile_id: userId,
-    theme,
-    attempts: s.attempts,
-    solved: s.solved,
-  }))
-  if (themeRows.length > 0) {
-    const { error: themeStatsError } = await supabase
-      .from('theme_stats')
-      .upsert(themeRows, { onConflict: 'profile_id,theme' })
-    if (themeStatsError) throw new Error('theme_stats write failed')
-  }
-
-  const profile = await getProfile()
-  const { error: profileStatsError } = await supabase.from('profile_stats').upsert(
-    {
-      profile_id: userId,
-      rating: profile.rating,
-      current_streak: profile.currentStreak,
-      best_streak: profile.bestStreak,
-      total_solved: profile.totalSolved,
-      total_failed: profile.totalFailed,
-    },
-    { onConflict: 'profile_id' },
-  )
-  if (profileStatsError) throw new Error('profile_stats write failed')
+  const { error: recomputeError } = await supabase.rpc('recompute_stats')
+  if (recomputeError) throw new Error('recompute_stats failed')
 
   const prefs = await getPreferences()
   const { error: preferencesError } = await supabase.from('preferences').upsert(
