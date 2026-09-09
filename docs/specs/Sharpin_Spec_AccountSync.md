@@ -136,7 +136,27 @@ Status: this logic does not exist yet. Confirmed via investigation — the curre
 
 ## 6. Sync Triggers
 
-Login/logout-boundary sync (pull on login, push on logout/background), favoring free-tier efficiency over continuous real-time sync. Exact trigger granularity (e.g. also sync after each puzzle completion vs. batch at session end) to be finalized in investigation against Supabase free-tier request limits.
+**Status: built** (backlog #1 continuation, six-commit build, September 2026). Supersedes the "to be finalized against free-tier limits" placeholder this section previously held — final, as-built design below.
+
+**Push (real-time, not batched):**
+- After every puzzle attempt, while logged in: a direct, authenticated client write to `puzzle_attempts` (`storage.js`'s `recordAttempt` → `pushAttemptIfPossible`), immediately following the local IndexedDB write. No Edge Function — RLS (`profile_id = auth.uid()`) already scopes this correctly.
+- Each locally-recorded attempt carries a `synced` boolean (`false` until push confirms; pre-existing records from before this field existed default to `true`, never retroactively queued) and a `remoteId` (a `crypto.randomUUID()` generated once at record time, reused on every retry) used as `puzzle_attempts.id`. Reusing the same id makes retries idempotent: a duplicate insert of an already-landed row hits Postgres's `23505` unique-violation, treated as success (the push's own response was lost, not the write), not a failure.
+- Push failure (offline, dropped connection) never blocks or throws from the local write path — it just leaves `synced: false` for the retry queue below.
+
+**Retry queue:** `flushUnsyncedAttempts()` re-attempts every locally-unsynced attempt. No user-visible indicator — silent, best-effort.
+
+**Pull:**
+- On login, and on app foreground/resume (Page Visibility API `visibilitychange`, not a continuous poll or timer).
+- Watermarked via `puzzle_attempts.updated_at` (server-set on every write via a `before insert or update` trigger) — NOT `attempted_at`, which is client-set and unsafe as a watermark: a delayed retry (from the queue above) could insert a row whose `attempted_at` is already behind a watermark that's advanced past it, silently skipping that row forever. The watermark advances to the max `updated_at` among the rows a pull's query actually returned — not the client's current time — closing a race where a row committed between the query running and the watermark write could otherwise be skipped on every future pull. If the query returns zero rows, the watermark is left unchanged rather than advanced.
+- Fetched rows are deduped against `remoteId`s already present locally (a row this same device already pushed can still fall after the last watermark and reappear in the query) and bulk-inserted in a single IndexedDB transaction, each immediately marked `synced: true` — an unflagged pulled row would otherwise risk being swept into the retry queue and colliding on re-push.
+
+**Sequence, both triggers:** pull → flush → recompute (`recompute_stats()`, below), run fully in the background — never blocks puzzle-board rendering or interaction. A ref-based mutex (not just relying on `visibilitychange` never firing on initial mount) ensures the sequence can never run twice concurrently, regardless of how close together the two triggers land — e.g. the boot session-restore resolving right as a foreground event fires.
+
+**Stats (`profile_stats`/`theme_stats`):** never written by a client-computed direct upsert. The only path that writes them, going forward, is `recompute_stats()` — a `SECURITY INVOKER` Postgres RPC taking no parameters (identity from `auth.uid()` internally, never a client-supplied `profile_id`) — which derives rating (`DEFAULT_RATING + sum(rating_delta)`), solve/fail totals, and streaks (a gaps-and-islands scan over `attempted_at` order, tiebroken on `id` for deterministic results when two attempts share an identical timestamp) directly from `puzzle_attempts`, plus per-theme accuracy via `unnest(themes)`. It's idempotent and side-effect-free beyond its own upserts. Called by both sync-sequence triggers above, and unconditionally by the guest-to-account migration (`LaunchOverlay.jsx`'s `migrateGuestDataToAccount`, on both a fresh migration and an already-migrated retry) — replacing that function's own former client-side `profile_stats`/`theme_stats` upserts.
+
+**Sanity backstop** (independent layer, defense in depth — not part of the sync flow itself): four CHECK constraints on `profile_stats` (non-negative counts, `best_streak >= current_streak`) plus a `BEFORE INSERT OR UPDATE` trigger on `profile_stats`/`theme_stats` that reconciles values exactly against `puzzle_attempts` (a loose bound only for streaks — `best_streak <= total_solved`; exact streak reconciliation via window function is explicitly deferred) and logs any mismatch to `anomaly_log`. Never raises, never blocks the write — this is a detection layer against a client bypassing `recompute_stats()` and upserting these tables directly (existing RLS enforces row ownership, not value correctness), not a correctness gate.
+
+**Explicitly not built:** live cross-device conflict resolution — sequential device usage is assumed, matching §8's existing accepted-risk note below.
 
 ## 7. Sequencing
 
