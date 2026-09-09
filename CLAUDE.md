@@ -19,6 +19,41 @@ Mobile-first chess puzzle trainer. React + Vite 8, fully client-side. Coach laye
 - `npm run dev` is sufficient for local dev. There are no serverless functions in this app — the `api/` directory, `vercel.json`, and the Claude API dependency were all removed when the coach layer moved client-side. Do not reintroduce a `vercel dev` requirement or any API route unless explicitly asked.
 - `.env` is required for the app to boot at all — not optional local-dev setup. Must define `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. `VITE_SUPABASE_URL` must be the **bare** project URL (e.g. `https://<ref>.supabase.co`) — no path suffix. A `/rest/v1` suffix was a real live bug caught this session: it silently broke `supabase.functions.invoke()` and `supabase.auth.setSession()` (wrong base URL), while `getSession()` still appeared to work. `src/lib/supabaseClient.js`'s `createClient()` call throws synchronously if the URL is missing/empty, so a misconfigured or absent `.env` crashes the app on load, not just on some later auth action.
 
+## Test fixtures
+A persistent test account exists in the LIVE Supabase project for Playwright-driven,
+real-backend verification across commits — reused instead of creating/deleting a
+fresh throwaway account every time, which kept re-tripping `create-account`'s
+rate limiter (3/60min per IP) mid-session.
+
+- Profile id: `1e119080-4dd7-46be-a56f-9c54ca46c743`.
+- Marked via `display_name = 'TEST_FIXTURE_KEEP'` — the only reliable way to
+  identify it in a query. Its auth email is the standard synthetic
+  `{uuid}@auth.sharpin.internal`, indistinguishable from any other account by
+  that alone.
+- Login sequence (the 4 drag-moves matched against its `move_sequence_hash`,
+  i.e. its "password"): `[['c2','c4'], ['b2','b4'], ['a1','a2'], ['g1','g2']]`
+  (from-square, to-square pairs, in order) on the Login tab's sequence board.
+- **Cleanup-check semantics changed.** Every commit's post-test cleanup check
+  used to query `select count(*) from public.profiles where id != '<real
+  account id>'` and require 0. That will now always show at least 1 (this
+  fixture) even when cleanup is otherwise perfect. The query must now exclude
+  BOTH the real account id AND this fixture's id, and the result should be
+  read as **"0 unexpected test accounts,"** not "0 test accounts." Do not
+  delete this fixture as part of a routine cleanup pass — it's meant to
+  persist across sessions, unlike every other throwaway test account created
+  during verification.
+- Its identity (auth user + profile row) is permanent, but its
+  `puzzle_attempts`/`profile_stats`/`theme_stats` rows are NOT guaranteed
+  stable across test runs — a later verification pass may reset/clear them
+  as needed. Don't assume a past commit's test data is still sitting on this
+  account.
+- Known exception: Commit 6 (guest-to-account migration) specifically tests
+  the "brand-new account with zero puzzle_attempts" precondition its
+  idempotency pre-check branches on — that test may still need a genuinely
+  fresh throwaway account, or this fixture deliberately cleared to zero
+  puzzle_attempts first, rather than reusing it in whatever state it's
+  accumulated.
+
 ## Conventions
 - Shared labels/constants live in one source-of-truth util (see `src/utils/themeLabels.js`) — don't duplicate strings across components.
 - All storage access goes through `src/utils/storage.js` — don't touch IndexedDB directly from components. Includes `resetAllLocalData()` (atomic reset of all four local stores back to their existing defaults — used by the guest-to-account migration's Discard path; irreversible).
