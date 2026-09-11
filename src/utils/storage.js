@@ -13,8 +13,40 @@ const STORE_PROFILE = 'profile'
 const STORE_ATTEMPTS = 'attempts'
 const STORE_THEME_STATS = 'themeStats'
 const STORE_PREFERENCES = 'preferences'
-const PROFILE_KEY = 'main'
-const PREFERENCES_KEY = 'main'
+
+// Storage partitioning (docs/specs/storage-partitioning-investigation.md,
+// Option A): every local store is namespaced by identity -- a real account's
+// id when logged in, this fixed sentinel otherwise. Exported so callers that
+// need EXPLICIT access to the guest bucket regardless of whichever identity
+// is currently active (LaunchOverlay.jsx's migrateGuestDataToAccount/
+// handleDiscard -- see the `identity` override param on the functions below)
+// can reference the same constant rather than duplicating the string.
+export const GUEST_IDENTITY = 'guest'
+
+// Resolves "who owns the data this call is about to read/write." Mirrors the
+// exact pattern already used by pushAttemptIfPossible/pullRemoteAttempts
+// (a live supabase.auth.getSession() call) rather than introducing a second
+// identity source -- so every storage function's notion of "current
+// identity" agrees with the same live session state those two already read.
+// The ACCOUNT_SYNC_ENABLED short-circuit comes FIRST, not after an
+// unconditional getSession() call, so the "flag off means zero Supabase
+// traffic" invariant holds literally, not just "no traffic ends up
+// happening" -- getSession() itself is a local-storage read with no network
+// call when there's no session, but skipping it entirely when the feature
+// is off keeps this file's existing guarantee exact.
+//
+// Deliberately NOT the right tool for every call site: LaunchOverlay.jsx's
+// guest-to-account migration path (Merge/Discard) needs to operate on the
+// GUEST_IDENTITY bucket specifically, regardless of the real account session
+// that's already active by the time that code runs -- see the `identity`
+// override parameter on getAllAttempts/getPreferences/resetAllLocalData/
+// markAttemptsSynced below, which exists exactly for that case and must be
+// used there instead of relying on this auto-resolution.
+async function resolveIdentity() {
+  if (!ACCOUNT_SYNC_ENABLED) return GUEST_IDENTITY
+  const { data: { session } } = await supabase.auth.getSession()
+  return session ? session.user.id : GUEST_IDENTITY
+}
 
 let dbPromise = null
 
@@ -62,21 +94,32 @@ const DEFAULT_PROFILE = {
   bestStreak: 0,
 }
 
+// STORE_PROFILE/STORE_PREFERENCES are out-of-line stores keyed by an
+// arbitrary string -- namespacing them is a pure key-scheme change (identity
+// itself, no prefix needed: the store name already disambiguates "profile"
+// from "preferences", so profile/guest and preferences/guest can't collide).
+// Split into a private identity-taking half (reused by recordAttempt, which
+// resolves identity once and threads it through several calls rather than
+// re-resolving per call) and a public auto-resolving wrapper.
+async function getProfileFor(identity) {
+  const db = await openDB()
+  const t = tx(db, [STORE_PROFILE], 'readonly')
+  const result = await reqToPromise(t.objectStore(STORE_PROFILE).get(identity))
+  return result ?? { ...DEFAULT_PROFILE }
+}
+
 /**
  * Load the user's profile (rating, streaks, solve counts), creating a
  * default one if this is a first run.
  */
 export async function getProfile() {
-  const db = await openDB()
-  const t = tx(db, [STORE_PROFILE], 'readonly')
-  const result = await reqToPromise(t.objectStore(STORE_PROFILE).get(PROFILE_KEY))
-  return result ?? { ...DEFAULT_PROFILE }
+  return getProfileFor(await resolveIdentity())
 }
 
-async function saveProfile(profile) {
+async function saveProfile(profile, identity) {
   const db = await openDB()
   const t = tx(db, [STORE_PROFILE], 'readwrite')
-  t.objectStore(STORE_PROFILE).put(profile, PROFILE_KEY)
+  t.objectStore(STORE_PROFILE).put(profile, identity)
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
@@ -90,24 +133,35 @@ const DEFAULT_PREFERENCES = {
   lastPulledAt: null, // ISO string watermark for pullRemoteAttempts; null means "never pulled"
 }
 
+async function getPreferencesFor(identity) {
+  const db = await openDB()
+  const t = tx(db, [STORE_PREFERENCES], 'readonly')
+  const result = await reqToPromise(t.objectStore(STORE_PREFERENCES).get(identity))
+  return { ...DEFAULT_PREFERENCES, ...result }
+}
+
 /**
  * Load the user's app-mode/board-theme/input-mode preferences, creating the
  * defaults if this is a first run. Merges over DEFAULT_PREFERENCES rather
  * than returning a stored record as-is, so a key added after a user's first
  * visit (e.g. inputMode) still resolves to its default on their existing,
  * older-shaped record instead of coming back undefined.
+ *
+ * `identity` override: pass `{ identity: GUEST_IDENTITY }` to read the guest
+ * bucket explicitly regardless of the currently-active session -- needed by
+ * LaunchOverlay.jsx's migrateGuestDataToAccount, which runs after a new
+ * account's session is already active but must read the GUEST data being
+ * migrated, not the (still-empty) new account's own preferences.
  */
-export async function getPreferences() {
-  const db = await openDB()
-  const t = tx(db, [STORE_PREFERENCES], 'readonly')
-  const result = await reqToPromise(t.objectStore(STORE_PREFERENCES).get(PREFERENCES_KEY))
-  return { ...DEFAULT_PREFERENCES, ...result }
+export async function getPreferences({ identity } = {}) {
+  return getPreferencesFor(identity ?? await resolveIdentity())
 }
 
 export async function savePreferences(preferences) {
+  const identity = await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_PREFERENCES], 'readwrite')
-  t.objectStore(STORE_PREFERENCES).put(preferences, PREFERENCES_KEY)
+  t.objectStore(STORE_PREFERENCES).put(preferences, identity)
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
@@ -116,27 +170,42 @@ export async function savePreferences(preferences) {
 
 /**
  * Per-theme accuracy: { [theme]: { attempts, solved } }
+ *
+ * STORE_THEME_STATS is keyed by bare theme name today; namespacing it means
+ * a compound `${identity}::${theme}` key rather than a schema change (still
+ * an out-of-line store, still an arbitrary string key -- no DB_VERSION bump,
+ * per the investigated design). Filters by prefix and strips it back off
+ * when rebuilding the returned map, so callers see the exact same shape as
+ * before.
  */
 export async function getThemeStats() {
+  const identity = await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_THEME_STATS], 'readonly')
   const store = t.objectStore(STORE_THEME_STATS)
   const keys = await reqToPromise(store.getAllKeys())
   const values = await reqToPromise(store.getAll())
+  const prefix = `${identity}::`
   const stats = {}
-  keys.forEach((key, i) => { stats[key] = values[i] })
+  keys.forEach((key, i) => {
+    if (typeof key === 'string' && key.startsWith(prefix)) {
+      stats[key.slice(prefix.length)] = values[i]
+    }
+  })
   return stats
 }
 
-async function bumpThemeStats(db, themes, solved) {
+async function bumpThemeStats(db, identity, themes, solved) {
   const t = tx(db, [STORE_THEME_STATS], 'readwrite')
   const store = t.objectStore(STORE_THEME_STATS)
+  const prefix = `${identity}::`
   for (const theme of themes) {
-    const existing = await reqToPromise(store.get(theme))
+    const key = prefix + theme
+    const existing = await reqToPromise(store.get(key))
     const current = existing ?? { attempts: 0, solved: 0 }
     current.attempts += 1
     if (solved) current.solved += 1
-    store.put(current, theme)
+    store.put(current, key)
   }
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
@@ -175,27 +244,54 @@ function withSyncedDefault(attempt) {
   return { ...attempt, synced: attempt.synced ?? true }
 }
 
+// STORE_ATTEMPTS stays a single, unpartitioned-by-schema store (still
+// keyPath: 'id', autoIncrement -- no DB_VERSION bump) -- namespacing it
+// means an `ownerId` field on each record rather than separate stores, and
+// every read filters by `ownerId === <the identity in question>` after
+// getAll() (row counts here are one person's puzzle history, not a scale
+// where this needs an index).
+//
+// Deliberate, load-bearing detail: the filter is strict equality against a
+// concrete identity, with NO special case for a record whose `ownerId` is
+// altogether absent. A record with no `ownerId` at all is legacy data
+// written before this partitioning existed -- it must stay invisible to
+// every identity's ordinary reads until Commit 3's first-boot adoption
+// routine explicitly tags it, not silently attach itself to whichever
+// identity happens to read first. This is expected, already-investigated
+// behavior, not a gap: on a device with real pre-Commit-1 legacy data,
+// between this commit landing and Commit 3's adoption routine shipping,
+// that data is intentionally invisible (reads return empty/defaults) rather
+// than guessed-at.
+
 /**
  * Most recent N attempts, newest first — used to weight puzzle selection
  * away from themes the user has just seen.
  */
 export async function getRecentAttempts(limit = 15) {
+  const identity = await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
-  return all.slice(-limit).reverse().map((a) => withSyncedDefault(withHintUsedDefault(a)))
+  const owned = all.filter((a) => a.ownerId === identity)
+  return owned.slice(-limit).reverse().map((a) => withSyncedDefault(withHintUsedDefault(a)))
 }
 
 /**
  * The full attempt history, newest first — used by the rule-based coach to
  * find each theme's most recent occurrences regardless of how far back they
  * fall (a rare theme's last 10 attempts may be older than any fixed window).
+ *
+ * `identity` override: see getPreferences' doc comment above -- same
+ * reasoning, same caller (migrateGuestDataToAccount needs the GUEST bucket
+ * explicitly, not whatever identity is currently active).
  */
-export async function getAllAttempts() {
+export async function getAllAttempts({ identity } = {}) {
+  const activeIdentity = identity ?? await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
-  return all.slice().reverse().map((a) => withSyncedDefault(withHintUsedDefault(a)))
+  const owned = all.filter((a) => a.ownerId === activeIdentity)
+  return owned.slice().reverse().map((a) => withSyncedDefault(withHintUsedDefault(a)))
 }
 
 /**
@@ -204,13 +300,20 @@ export async function getAllAttempts() {
  * `id` (the local autoincrement key) is what markAttemptSynced needs to
  * update the right row back; `remoteId` is the row's separate, stable
  * identity in Supabase (see recordAttempt's own comment for why these are
- * two different values).
+ * two different values). Scoped to the current identity's own rows --
+ * structurally can never surface a different identity's unsynced rows, so
+ * flushUnsyncedAttempts can never push someone else's history under the
+ * wrong profile_id.
  */
 export async function getUnsyncedAttempts() {
+  const identity = await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
-  return all.map((a) => withSyncedDefault(withHintUsedDefault(a))).filter((a) => !a.synced)
+  return all
+    .filter((a) => a.ownerId === identity)
+    .map((a) => withSyncedDefault(withHintUsedDefault(a)))
+    .filter((a) => !a.synced)
 }
 
 // Returns the store's own generated key (available on the add request
@@ -241,6 +344,18 @@ async function appendAttempt(db, attempt) {
  * pullRemoteAttempts() dedupe check (which matches on remoteId) would fail
  * to recognize that remote row as already-covered and insert a duplicate.
  *
+ * `identity` override, distinct in kind from getAllAttempts/getPreferences'
+ * above: lookup here is always by raw store id (already identity-agnostic --
+ * autoincrement keys are unique store-wide), so there's nothing to "read
+ * under the wrong namespace." What this parameter controls instead is
+ * whether the row's `ownerId` gets REASSIGNED. Ordinary push-success
+ * (pushAttemptIfPossible, no identity passed) must leave `ownerId` exactly
+ * as it already was -- the row already belongs to whoever's pushing it.
+ * migrateGuestDataToAccount passes the new account's id here specifically
+ * because Merge IS the moment a guest-owned row's ownership actually
+ * transfers -- this is the one legitimate place a row's `ownerId` changes
+ * after creation.
+ *
  * STORE_ATTEMPTS is an in-line-keyed store ({ keyPath: 'id', autoIncrement:
  * true }) -- unlike the other three stores (out-of-line, no keyPath), its
  * key lives INSIDE the stored object itself. put() on an in-line-keyed
@@ -248,14 +363,19 @@ async function appendAttempt(db, attempt) {
  * out-of-line stores) -- the key is derived from the object's own `id`
  * field, which `existing` already carries from the read below.
  */
-export async function markAttemptsSynced(entries) {
+export async function markAttemptsSynced(entries, { identity } = {}) {
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readwrite')
   const store = t.objectStore(STORE_ATTEMPTS)
   for (const { id, remoteId } of entries) {
     const existing = await reqToPromise(store.get(id))
     if (!existing) continue
-    store.put({ ...existing, remoteId: remoteId ?? existing.remoteId, synced: true })
+    store.put({
+      ...existing,
+      remoteId: remoteId ?? existing.remoteId,
+      synced: true,
+      ownerId: identity ?? existing.ownerId,
+    })
   }
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
@@ -310,9 +430,7 @@ async function pushAttemptIfPossible(attempt) {
 /**
  * Retries pushing every locally-unsynced attempt -- the retry queue for
  * whatever recordAttempt's own real-time push didn't manage to land
- * (offline, a dropped connection mid-request, etc.). NOT wired to any
- * trigger yet: the login/foreground pull-push-recompute sequence that calls
- * this is a separate, later piece of this build. Safe to call with the
+ * (offline, a dropped connection mid-request, etc.). Safe to call with the
  * feature disabled or no session (each row's push attempt no-ops via
  * pushAttemptIfPossible's own guard); safe to call repeatedly (idempotent,
  * per the 23505-as-success handling above).
@@ -329,29 +447,30 @@ export async function flushUnsyncedAttempts() {
  * last successful pull, and bulk-inserts them into the local attempts store.
  *
  * Watermark column is `updated_at`, not `attempted_at`. attempted_at is
- * client-set at solve time; a delayed flushUnsyncedAttempts retry (Commit 1)
- * can insert a row whose attempted_at is well before a watermark that has
+ * client-set at solve time; a delayed flushUnsyncedAttempts retry can
+ * insert a row whose attempted_at is well before a watermark that has
  * already advanced past it, silently skipping that row forever. updated_at
  * is server-set via puzzle_attempts_set_updated_at (`before insert or
  * update`, stamps now()) -- confirmed by reading the schema directly, this
  * column already exists for exactly this purpose (its own migration comment
  * calls it "the server-set LWW conflict-resolution timestamp"), and no
  * client code path ever UPDATEs a puzzle_attempts row after insert, so it
- * behaves as a pure insertion timestamp in practice. No new migration was
- * needed.
+ * behaves as a pure insertion timestamp in practice.
  *
  * Dedupes fetched rows against remoteIds already present locally before
  * inserting -- required, not just defensive: a row this same device already
- * pushed (Commit 1) can still fall after the last pull's watermark and
- * reappear in this query. Without the dedupe it would be inserted a second
- * time under a new local autoincrement key.
+ * pushed can still fall after the last pull's watermark and reappear in
+ * this query. Without the dedupe it would be inserted a second time under a
+ * new local autoincrement key. The dedupe set is built from this identity's
+ * own getAllAttempts() -- consistent with everything else here, a pull can
+ * only ever affect this identity's own rows.
  *
- * Every inserted row is written with synced: true immediately -- an
- * unflagged pulled row risks being swept into flushUnsyncedAttempts and
- * causing a duplicate-key (23505) conflict on re-push.
- *
- * Not wired to any trigger yet (Commit 4 wires this into the login/
- * foreground sequence).
+ * Every inserted row is written with synced: true and ownerId: the pulling
+ * session's own user id immediately -- an unflagged pulled row risks being
+ * swept into flushUnsyncedAttempts and causing a duplicate-key (23505)
+ * conflict on re-push; an untagged one would be invisible to every
+ * identity's reads (see the STORE_ATTEMPTS comment above) including the
+ * very session that just pulled it.
  */
 export async function pullRemoteAttempts() {
   if (!ACCOUNT_SYNC_ENABLED) return { pulled: 0 }
@@ -394,6 +513,7 @@ export async function pullRemoteAttempts() {
         at: new Date(row.attempted_at).getTime(),
         synced: true,
         remoteId: row.id,
+        ownerId: session.user.id,
       })
     }
     await new Promise((resolve, reject) => {
@@ -422,6 +542,12 @@ export async function pullRemoteAttempts() {
  * Record a completed puzzle attempt: updates the attempt log, per-theme
  * accuracy, and the rolling profile (rating/streak/counts) in one place.
  *
+ * Identity is resolved exactly once, up front, and threaded through every
+ * sub-write (profile, attempts, theme stats) rather than each sub-call
+ * re-resolving it independently -- guarantees one consistent identity
+ * snapshot for the whole operation instead of relying on the session
+ * staying put across several separate getSession() calls.
+ *
  * @param {object} params
  * @param {string} params.puzzleId
  * @param {string[]} params.themes
@@ -433,8 +559,9 @@ export async function pullRemoteAttempts() {
  * @returns {Promise<object>} the updated profile
  */
 export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRating, ratingDelta, timeTakenMs }) {
+  const identity = await resolveIdentity()
   const db = await openDB()
-  const profile = await getProfile()
+  const profile = await getProfileFor(identity)
 
   const updated = {
     ...profile,
@@ -457,14 +584,14 @@ export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRat
   const remoteId = crypto.randomUUID()
   const attemptRecord = {
     puzzleId, themes, solved, hintUsed: !!hintUsed, ratingDelta, timeTakenMs,
-    at: Date.now(), synced: false, remoteId,
+    at: Date.now(), synced: false, remoteId, ownerId: identity,
   }
 
   const localId = await appendAttempt(db, attemptRecord)
 
   await Promise.all([
-    bumpThemeStats(db, themes, solved),
-    saveProfile(updated),
+    bumpThemeStats(db, identity, themes, solved),
+    saveProfile(updated, identity),
   ])
 
   // Fire-and-forget: never blocks recordAttempt's own return (rating/streak
@@ -478,26 +605,54 @@ export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRat
 }
 
 /**
- * Clears all local guest data back to first-run defaults: attempts and
- * theme_stats emptied, profile and preferences reset to the same defaults
- * a brand-new install would have (DEFAULT_PROFILE / DEFAULT_PREFERENCES --
- * reusing the existing default-value constants rather than inventing new
- * ones). Irreversible.
+ * Clears local data back to first-run defaults for ONE identity: that
+ * identity's attempts/theme-stats rows removed, its profile/preferences
+ * reset to the same defaults a brand-new install would have. Irreversible.
  *
- * Guest-to-account migration's Discard path (Sub-build B2b): called only
- * after the user explicitly chooses to discard local history in favor of
- * a newly-created, empty remote account -- this makes local state match
- * that empty account exactly. Single readwrite transaction spanning all
- * four stores so the reset is atomic (no possibility of, e.g., attempts
- * clearing but preferences surviving on an interrupted write).
+ * This is no longer a whole-store `.clear()` (that would have been correct
+ * pre-partitioning, when the store only ever held one identity's data at
+ * all -- it is not correct now: a device can legitimately hold more than
+ * one identity's data side by side, e.g. a guest interlude sitting next to
+ * an already-adopted account's history, and a wholesale clear would destroy
+ * both). Attempts/theme-stats use a cursor to delete only rows/keys tagged
+ * with the target identity; profile/preferences are single-key-per-identity
+ * writes, so overwriting that identity's key with defaults is already
+ * exactly scoped.
+ *
+ * `identity` override: see getPreferences' doc comment -- LaunchOverlay.jsx's
+ * handleDiscard needs this to target GUEST_IDENTITY explicitly, since by the
+ * time Discard is reachable the active session already belongs to the new
+ * account, not the guest data being discarded.
  */
-export async function resetAllLocalData() {
+export async function resetAllLocalData({ identity } = {}) {
+  const activeIdentity = identity ?? await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_PROFILE, STORE_ATTEMPTS, STORE_THEME_STATS, STORE_PREFERENCES], 'readwrite')
-  t.objectStore(STORE_PROFILE).put({ ...DEFAULT_PROFILE }, PROFILE_KEY)
-  t.objectStore(STORE_ATTEMPTS).clear()
-  t.objectStore(STORE_THEME_STATS).clear()
-  t.objectStore(STORE_PREFERENCES).put({ ...DEFAULT_PREFERENCES }, PREFERENCES_KEY)
+
+  t.objectStore(STORE_PROFILE).put({ ...DEFAULT_PROFILE }, activeIdentity)
+  t.objectStore(STORE_PREFERENCES).put({ ...DEFAULT_PREFERENCES }, activeIdentity)
+
+  const attemptsStore = t.objectStore(STORE_ATTEMPTS)
+  const attemptsCursorReq = attemptsStore.openCursor()
+  attemptsCursorReq.onsuccess = () => {
+    const cursor = attemptsCursorReq.result
+    if (!cursor) return
+    if (cursor.value.ownerId === activeIdentity) cursor.delete()
+    cursor.continue()
+  }
+
+  const themeStatsStore = t.objectStore(STORE_THEME_STATS)
+  const themePrefix = `${activeIdentity}::`
+  const themeCursorReq = themeStatsStore.openKeyCursor()
+  themeCursorReq.onsuccess = () => {
+    const cursor = themeCursorReq.result
+    if (!cursor) return
+    if (typeof cursor.key === 'string' && cursor.key.startsWith(themePrefix)) {
+      themeStatsStore.delete(cursor.key)
+    }
+    cursor.continue()
+  }
+
   return new Promise((resolve, reject) => {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
