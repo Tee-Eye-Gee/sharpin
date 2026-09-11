@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
-import { getAllAttempts, getPreferences, markAttemptsSynced, resetAllLocalData } from '../utils/storage'
+import { GUEST_IDENTITY, getAllAttempts, getPreferences, markAttemptsSynced, resetAllLocalData } from '../utils/storage'
 import { validateDisplayName } from '../utils/validateDisplayName'
 import SequenceBoardInput from './SequenceBoardInput'
 
@@ -66,7 +66,12 @@ async function migrateGuestDataToAccount(userId) {
   }
 
   if (!existingRemoteAttempts) {
-    const localAttempts = await getAllAttempts()
+    // Explicit GUEST_IDENTITY override, not auto-resolution -- by the time
+    // this runs, the active session is already the new account (handleMerge
+    // only fires after setSession() succeeded), so an unscoped call here
+    // would read the new account's own empty namespace, not the guest data
+    // being migrated (storage-partitioning-investigation.md, addendum 1).
+    const localAttempts = await getAllAttempts({ identity: GUEST_IDENTITY })
     if (localAttempts.length > 0) {
       const attemptsWithRemoteId = localAttempts.map((a) => ({
         ...a,
@@ -86,14 +91,24 @@ async function migrateGuestDataToAccount(userId) {
       const { error: attemptsError } = await supabase.from('puzzle_attempts').insert(rows)
       if (attemptsError) throw new Error('puzzle_attempts write failed')
 
-      await markAttemptsSynced(attemptsWithRemoteId.map((a) => ({ id: a.id, remoteId: a.remoteId })))
+      // { identity: userId } here is a REASSIGNMENT, not a namespace-read
+      // override -- storage.js's markAttemptsSynced looks these rows up by
+      // raw store id (already identity-agnostic) regardless; this is what
+      // actually transfers ownership of the row from GUEST_IDENTITY to the
+      // new account, which is exactly what Merge means (see storage.js's own
+      // doc comment on markAttemptsSynced for why this differs in kind from
+      // the getAllAttempts/getPreferences overrides above/below).
+      await markAttemptsSynced(
+        attemptsWithRemoteId.map((a) => ({ id: a.id, remoteId: a.remoteId })),
+        { identity: userId },
+      )
     }
   }
 
   const { error: recomputeError } = await supabase.rpc('recompute_stats')
   if (recomputeError) throw new Error('recompute_stats failed')
 
-  const prefs = await getPreferences()
+  const prefs = await getPreferences({ identity: GUEST_IDENTITY })
   const { error: preferencesError } = await supabase.from('preferences').upsert(
     {
       profile_id: userId,
@@ -216,6 +231,30 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
       return
     }
 
+    // Guest-to-account migration (Sub-build B2b) hooks in exactly here:
+    // local IndexedDB history existing at this exact moment is what
+    // triggers the Merge/Discard prompt (spec §5) rather than a silent
+    // decision either way.
+    //
+    // Deliberately checked BEFORE setSession() below, not after -- this is
+    // one of the two required fixes from storage-partitioning-investigation.md
+    // addendum 1. Under Commit 1's namespacing, storage.js resolves "current
+    // identity" from the live Supabase session; setSession() flips that the
+    // instant it resolves, independent of this component's own React state.
+    // Checking after setSession() would read the brand-new account's own
+    // (still-empty) namespace instead of the guest history being checked
+    // for. The explicit { identity: GUEST_IDENTITY } override makes this
+    // correct regardless of ordering too (belt and suspenders) -- but the
+    // ordering itself is kept honest here as well, so the code's literal
+    // sequence matches what it's actually checking: guest history, before
+    // any session has changed.
+    const existingAttempts = await getAllAttempts({ identity: GUEST_IDENTITY })
+
+    // setSessionData.session (setSession()'s own resolved return value,
+    // which includes .user) is used below rather than the raw create-account
+    // response (data.session is just { access_token, refresh_token } -- no
+    // .user) -- handleMerge needs pendingSession.user.id, which only the
+    // resolved session has.
     const { data: setSessionData, error: setSessionError } = await supabase.auth.setSession(data.session)
     setSubmitting(false)
     if (setSessionError) {
@@ -223,15 +262,6 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
       return
     }
 
-    // Guest-to-account migration (Sub-build B2b) hooks in exactly here:
-    // local IndexedDB history existing at this exact moment is what
-    // triggers the Merge/Discard prompt (spec §5) rather than a silent
-    // decision either way. Uses setSessionData.session (setSession()'s own
-    // resolved return value, which includes .user) rather than the raw
-    // create-account response (data.session is just
-    // { access_token, refresh_token } -- no .user) -- handleMerge below
-    // needs pendingSession.user.id, which only the resolved session has.
-    const existingAttempts = await getAllAttempts()
     if (existingAttempts.length > 0) {
       setPendingSession(setSessionData.session)
       setView(VIEWS.MIGRATION_PROMPT)
@@ -256,7 +286,11 @@ export default function LaunchOverlay({ onGuest, onAuthenticated, actionsDisable
   async function handleDiscard() {
     setMigrationError('')
     setMigrating(true)
-    await resetAllLocalData()
+    // Explicit GUEST_IDENTITY override -- same reasoning as
+    // migrateGuestDataToAccount above: the active session by this point is
+    // already the new account, and Discard means "drop the guest history,"
+    // not "wipe whatever identity happens to be active right now."
+    await resetAllLocalData({ identity: GUEST_IDENTITY })
     setMigrating(false)
     onAuthenticated(pendingSession)
   }
