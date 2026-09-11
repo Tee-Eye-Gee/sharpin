@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { getPreferences, savePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
+import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, savePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -64,14 +64,14 @@ export default function App() {
   // transition needs to touch this.
   const [analyzeMode, setAnalyzeMode] = useState(false)
 
-  // Boot-time session check (Sub-build B1). Independent of the puzzle-load
-  // and preferences-load effects below -- runs in parallel, does not gate
-  // or delay either of them. 'disabled' (feature-flag off) is a distinct
-  // terminal state from 'checking' -- initialized directly from the flag,
-  // never transitioned into/out of, so it's honest about nothing being "in
-  // progress" when the flag is off (rather than parking at 'checking'
-  // forever). LaunchOverlay's render condition below only ever matches
-  // 'none', so 'disabled' keeps it unmounted the same way 'checking' does.
+  // 'disabled' (feature-flag off) is a distinct terminal state from
+  // 'checking' -- initialized directly from the flag, never transitioned
+  // into/out of, so it's honest about nothing being "in progress" when the
+  // flag is off (rather than parking at 'checking' forever). LaunchOverlay's
+  // render condition below only ever matches 'none', so 'disabled' keeps it
+  // unmounted the same way 'checking' does. Resolved by the boot effect
+  // below, which is no longer independent of the preferences load (see that
+  // effect's own comment for why, since storage partitioning).
   const [sessionStatus, setSessionStatus] = useState(ACCOUNT_SYNC_ENABLED ? 'checking' : 'disabled') // 'checking' | 'valid' | 'none' | 'disabled'
   const [session, setSession] = useState(null)
   // Guest tapped "Play as Guest" this page load -- keeps the overlay closed
@@ -85,21 +85,64 @@ export default function App() {
   // 'valid' anyway.
   const [displayName, setDisplayName] = useState(null)
 
+  // Boot-time session check, legacy-data adoption, and preferences load --
+  // deliberately ONE ordered sequence, not three independent effects racing
+  // each other. Storage partitioning
+  // (docs/specs/storage-partitioning-investigation.md, addenda 2-4) requires
+  // adoptLegacyDataIfSafe to run, and finish, before ANY other identity-
+  // scoped read this boot -- an early getPreferences() (or usePuzzleEngine's
+  // own getProfile()) racing ahead of adoption would see defaults from a
+  // not-yet-adopted legacy record, and nothing re-reads afterward to
+  // self-correct within the same page load. The three steps below are
+  // therefore awaited in sequence inside one async function, not split back
+  // into separate effects: (1) resolve session -- flag off means GUEST_
+  // IDENTITY immediately, no getSession() call at all, same "zero Supabase
+  // traffic" invariant as before; (2) adopt legacy data into whichever
+  // identity that resolved to, BEFORE sessionStatus is ever set away from
+  // 'checking' -- so every other effect keyed off sessionStatus (the
+  // sync-trigger effects below, and any future identity-scoped read) is
+  // structurally guaranteed to only ever see a post-adoption world; (3) load
+  // preferences, now safe to read under the resolved (and, if applicable,
+  // just-adopted) identity.
   useEffect(() => {
-    // Flag off: skip the call entirely -- not just hide its result. Zero
-    // Supabase network traffic on boot when Stage 3 is disabled.
-    if (!ACCOUNT_SYNC_ENABLED) return
-
     let cancelled = false
-    supabase.auth.getSession().then(({ data }) => {
-      if (cancelled) return
-      if (data.session) {
-        setSession(data.session)
-        setSessionStatus('valid')
+
+    async function boot() {
+      let identity
+      if (!ACCOUNT_SYNC_ENABLED) {
+        identity = GUEST_IDENTITY
       } else {
-        setSessionStatus('none')
+        const { data } = await supabase.auth.getSession()
+        if (cancelled) return
+        identity = data.session ? data.session.user.id : GUEST_IDENTITY
+        if (data.session) setSession(data.session)
       }
-    })
+
+      // See adoptLegacyDataIfSafe's own doc comment (storage.js) for the
+      // guest-vs-stranded-account disambiguation this performs when
+      // identity === GUEST_IDENTITY. Never called speculatively during a
+      // still-in-flight resolution -- by this point in `boot()`, resolution
+      // has already genuinely completed, one way or the other.
+      await adoptLegacyDataIfSafe(identity)
+      if (cancelled) return
+
+      setSessionStatus(!ACCOUNT_SYNC_ENABLED ? 'disabled' : identity === GUEST_IDENTITY ? 'none' : 'valid')
+
+      const prefs = await getPreferences()
+      if (cancelled) return
+      let mode = prefs.appMode
+      if (mode === null) {
+        mode = detectSystemAppMode()
+        await savePreferences({ ...prefs, appMode: mode })
+      }
+      if (cancelled) return
+      setAppMode(mode)
+      setBoardTheme(prefs.boardTheme)
+      setInputMode(prefs.inputMode)
+      applyTheme(mode, prefs.boardTheme)
+    }
+
+    boot()
     return () => { cancelled = true }
   }, [])
 
@@ -177,26 +220,6 @@ export default function App() {
     document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
   }, [sessionStatus, session, runSyncSequence])
-
-  // On first mount: load persisted preferences. If app mode has never been
-  // set, detect it from the OS once and persist that as the permanent
-  // choice — subsequent visits must not re-detect (spec §3).
-  useEffect(() => {
-    let cancelled = false
-    getPreferences().then(async (prefs) => {
-      if (cancelled) return
-      let mode = prefs.appMode
-      if (mode === null) {
-        mode = detectSystemAppMode()
-        await savePreferences({ ...prefs, appMode: mode })
-      }
-      setAppMode(mode)
-      setBoardTheme(prefs.boardTheme)
-      setInputMode(prefs.inputMode)
-      applyTheme(mode, prefs.boardTheme)
-    })
-    return () => { cancelled = true }
-  }, [])
 
   const toggleAppMode = useCallback(() => {
     setAppMode((prev) => {

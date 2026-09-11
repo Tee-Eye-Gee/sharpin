@@ -658,3 +658,131 @@ export async function resetAllLocalData({ identity } = {}) {
     t.onerror = () => reject(t.error)
   })
 }
+
+// The literal key every store used before this partitioning existed --
+// distinct from `identity` (Commit 1's namespacing) purely by name, so
+// adoptLegacyDataIfSafe's own reads below can't be confused with an
+// ordinary namespaced read. Used only by that function.
+const PRE_PARTITION_KEY = 'main'
+
+async function getLegacyRecord(db, storeName) {
+  const t = tx(db, [storeName], 'readonly')
+  return reqToPromise(t.objectStore(storeName).get(PRE_PARTITION_KEY))
+}
+
+// Raw, unfiltered, un-defaulted -- deliberately not getAllAttempts() (which
+// both filters by identity and applies withSyncedDefault). This needs every
+// row exactly as stored, including whichever ones have no `ownerId` at all.
+async function getRawAttempts(db) {
+  const t = tx(db, [STORE_ATTEMPTS], 'readonly')
+  return reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
+}
+
+// Every post-Commit-1 themeStats key is `${identity}::${theme}` -- `identity`
+// is always either GUEST_IDENTITY or a Supabase auth uuid, neither of which
+// contains '::', and no theme label in this app's fixed tactical lexicon
+// does either, so "does this key contain '::'" reliably distinguishes an
+// already-namespaced key from a legacy bare theme-name key.
+async function getLegacyThemeStatsEntries(db) {
+  const t = tx(db, [STORE_THEME_STATS], 'readonly')
+  const store = t.objectStore(STORE_THEME_STATS)
+  const keys = await reqToPromise(store.getAllKeys())
+  const values = await reqToPromise(store.getAll())
+  return keys
+    .map((key, i) => ({ key, value: values[i] }))
+    .filter(({ key }) => typeof key === 'string' && !key.includes('::'))
+}
+
+/**
+ * One-time-per-device adoption of legacy (pre-Commit-1, un-namespaced) local
+ * data into `identity`'s namespace. Full design trace:
+ * docs/specs/storage-partitioning-investigation.md, addenda 2-4.
+ *
+ * No separate "done" flag: presence/absence of legacy, un-namespaced data
+ * IS the idempotency signal. Once a record is adopted (copied to its new
+ * namespaced key/tag and the old bare key/tag removed, in the same
+ * transaction), there is nothing left for a later call to find -- calling
+ * this on every boot is always correct and, once a device's legacy data has
+ * actually been consumed, cheap (a few empty reads, no writes).
+ *
+ * `identity` is NOT resolved in here via a second, independent
+ * supabase.auth.getSession() call. The caller (App.jsx's boot sequence,
+ * the only intended call site) has already resolved this exactly once this
+ * boot; this parameter is that already-resolved value, expressed as either
+ * a real account id (a session was found) or GUEST_IDENTITY (resolution
+ * genuinely completed and found none). This function must never be called
+ * while resolution is still in flight -- there is no third "unconfirmed"
+ * value to pass for that state; the contract is that this simply isn't
+ * called yet.
+ *
+ * Guest-vs-stranded-account disambiguation (only relevant when identity ===
+ * GUEST_IDENTITY -- a real account id is always unambiguous and adopts
+ * immediately): a resolved "no session" is not, by itself, safe to treat as
+ * a genuine guest. The narrow edge case this whole mitigation exists for --
+ * a real account's session dying between boots (refresh fails, and the
+ * access token's real expiry has already passed) -- also resolves to a
+ * clean "no session," indistinguishable from an actual guest by session
+ * state alone. What DOES distinguish them, checked here: does any legacy
+ * attempts row have a RAW (pre-withSyncedDefault) stored `synced` value of
+ * exactly `true`? That value can only ever have been set by
+ * markAttemptsSynced, itself only ever reachable from a session-gated
+ * caller (pushAttemptIfPossible's post-getSession()-check success branch,
+ * or LaunchOverlay.jsx's already-authenticated Merge path) -- confirmed by
+ * full code and git-history trace, no guest-reachable path exists that
+ * produces this value. If found, this device provably was a real account
+ * at some point: defer entirely (touch nothing) and wait for a future
+ * confirmed boot rather than guess. If not found, proceed immediately --
+ * there is no account-shaped evidence being ignored.
+ *
+ * @param {string} identity
+ * @returns {Promise<{ adopted: boolean, deferred: boolean }>}
+ */
+export async function adoptLegacyDataIfSafe(identity) {
+  const db = await openDB()
+
+  const legacyProfile = await getLegacyRecord(db, STORE_PROFILE)
+  const legacyPreferences = await getLegacyRecord(db, STORE_PREFERENCES)
+  const legacyThemeStats = await getLegacyThemeStatsEntries(db)
+  const legacyAttempts = (await getRawAttempts(db)).filter((a) => a.ownerId === undefined)
+
+  const hasLegacyData = legacyProfile !== undefined
+    || legacyPreferences !== undefined
+    || legacyThemeStats.length > 0
+    || legacyAttempts.length > 0
+
+  if (!hasLegacyData) return { adopted: false, deferred: false }
+
+  if (identity === GUEST_IDENTITY) {
+    const provablyNotAGuest = legacyAttempts.some((a) => a.synced === true)
+    if (provablyNotAGuest) return { adopted: false, deferred: true }
+  }
+
+  const t = tx(db, [STORE_PROFILE, STORE_ATTEMPTS, STORE_THEME_STATS, STORE_PREFERENCES], 'readwrite')
+
+  if (legacyProfile !== undefined) {
+    t.objectStore(STORE_PROFILE).put(legacyProfile, identity)
+    t.objectStore(STORE_PROFILE).delete(PRE_PARTITION_KEY)
+  }
+  if (legacyPreferences !== undefined) {
+    t.objectStore(STORE_PREFERENCES).put(legacyPreferences, identity)
+    t.objectStore(STORE_PREFERENCES).delete(PRE_PARTITION_KEY)
+  }
+
+  const attemptsStore = t.objectStore(STORE_ATTEMPTS)
+  for (const attempt of legacyAttempts) {
+    attemptsStore.put({ ...attempt, ownerId: identity })
+  }
+
+  const themeStatsStore = t.objectStore(STORE_THEME_STATS)
+  for (const { key, value } of legacyThemeStats) {
+    themeStatsStore.put(value, `${identity}::${key}`)
+    themeStatsStore.delete(key)
+  }
+
+  await new Promise((resolve, reject) => {
+    t.oncomplete = () => resolve()
+    t.onerror = () => reject(t.error)
+  })
+
+  return { adopted: true, deferred: false }
+}
