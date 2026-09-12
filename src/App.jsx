@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
+import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -189,6 +189,13 @@ export default function App() {
       await pullRemoteAttempts()
       await flushUnsyncedAttempts()
       await supabase.rpc('recompute_stats')
+      // Preferences' own sync step, riding this same mutex-guarded
+      // login/foreground sequence -- deliberately NOT part of the three
+      // attempts steps above (independent store, independent branch logic:
+      // push-if-unsynced/else-pull-if-newer, not a fixed pull-then-push --
+      // see syncPreferences' own doc comment in storage.js for why that
+      // ordering differs from attempts' and must not be copied).
+      await syncPreferences()
     } catch {
       // Best-effort background sync -- must never surface to the user or
       // block puzzle-board interaction. The next login/foreground trigger

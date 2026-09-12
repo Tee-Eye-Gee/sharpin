@@ -255,6 +255,77 @@ export async function updatePreferences(partial) {
 }
 
 /**
+ * Preferences' own sync step, meant to be folded into the same login/
+ * foreground-triggered sequence attempts already uses (App.jsx's
+ * runSyncSequence), riding that same syncInFlightRef mutex -- but
+ * deliberately NOT attempts' own pull-then-push order. Full trace:
+ * docs/specs/theme-preferences-sync-investigation.md §3. Preferences is a
+ * single mutable row, not an append-only log, so pull-then-push (safe for
+ * attempts, since pulled rows can never overwrite a locally-pending
+ * unsynced row -- they're independent rows) would risk pull silently
+ * clobbering a genuinely-pending local edit here, where pull and a pending
+ * edit target the exact same record. The two steps are mutually exclusive
+ * branches instead, never both in the same pass:
+ *
+ * - Local record unsynced (a real pending edit): retry its push (the
+ *   original fire-and-forget attempt from updatePreferences may have
+ *   failed, or still be in flight -- a retry is safe and idempotent
+ *   either way, since preferences upsert has no dedup concerns at all).
+ *   Do NOT pull this trigger -- pulling now, while a local edit is
+ *   genuinely pending, is exactly the clobber risk this branch design
+ *   exists to avoid.
+ * - Local record already synced (nothing pending to protect): pull is
+ *   the only step that runs. Compares the server row's `updated_at`
+ *   against this device's own `preferencesUpdatedAt` specifically --
+ *   NEVER `lastPulledAt`, which is attempts' own, unrelated watermark; the
+ *   two fields are deliberately kept distinct in this record for exactly
+ *   this reason. No incoming row at all (an account that was created with
+ *   no guest history to migrate, and has never pushed a preference change
+ *   since) is a safe no-op, not an error.
+ *
+ * This already-locked LWW policy (Sharpin_Spec_AccountSync.md: "the more
+ * recent device-side change wins") holds correctly in both directions this
+ * way -- a genuinely more-recent local edit reaches the server before
+ * anything can overwrite it; a genuinely more-recent server-side change
+ * (from another device) is picked up whenever this device has nothing of
+ * its own pending.
+ */
+export async function syncPreferences() {
+  if (!ACCOUNT_SYNC_ENABLED) return
+
+  const identity = await resolveIdentity()
+  const local = await getPreferencesFor(identity)
+
+  if (!local.synced) {
+    await pushPreferencesIfPossible(local, identity)
+    return
+  }
+
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) return
+
+  const { data, error } = await supabase
+    .from('preferences')
+    .select('app_mode, board_theme, input_mode, updated_at')
+    .eq('profile_id', session.user.id)
+    .maybeSingle()
+
+  if (error || !data) return
+  if (local.preferencesUpdatedAt !== null && data.updated_at <= local.preferencesUpdatedAt) return
+
+  await savePreferencesFor(
+    {
+      ...local,
+      appMode: data.app_mode,
+      boardTheme: data.board_theme,
+      inputMode: data.input_mode,
+      preferencesUpdatedAt: data.updated_at,
+    },
+    identity,
+  )
+}
+
+/**
  * Per-theme accuracy: { [theme]: { attempts, solved } }
  *
  * STORE_THEME_STATS is keyed by bare theme name today; namespacing it means
