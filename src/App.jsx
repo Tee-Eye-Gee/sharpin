@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, savePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
+import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -133,7 +133,11 @@ export default function App() {
       let mode = prefs.appMode
       if (mode === null) {
         mode = detectSystemAppMode()
-        await savePreferences({ ...prefs, appMode: mode })
+        // updatePreferences, not savePreferences -- this is a genuine
+        // system-facing preference write (not pullRemoteAttempts' own
+        // watermark bookkeeping), so it should push like any other, per
+        // theme-preferences-sync-investigation.md's write-path enumeration.
+        await updatePreferences({ appMode: mode })
       }
       if (cancelled) return
       setAppMode(mode)
@@ -225,7 +229,7 @@ export default function App() {
     setAppMode((prev) => {
       const next = prev === 'dark' ? 'light' : 'dark'
       applyTheme(next, boardTheme)
-      getPreferences().then((prefs) => savePreferences({ ...prefs, appMode: next }))
+      updatePreferences({ appMode: next })
       return next
     })
   }, [boardTheme])
@@ -233,12 +237,12 @@ export default function App() {
   const selectBoardTheme = useCallback((themeId) => {
     setBoardTheme(themeId)
     applyTheme(appMode, themeId)
-    getPreferences().then((prefs) => savePreferences({ ...prefs, boardTheme: themeId }))
+    updatePreferences({ boardTheme: themeId })
   }, [appMode])
 
   const selectInputMode = useCallback((mode) => {
     setInputMode(mode)
-    getPreferences().then((prefs) => savePreferences({ ...prefs, inputMode: mode }))
+    updatePreferences({ inputMode: mode })
   }, [])
 
   // Calls update-profile (server-side is the actual enforcement point for

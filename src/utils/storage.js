@@ -131,6 +131,15 @@ const DEFAULT_PREFERENCES = {
   boardTheme: 'tournament',
   inputMode: 'drag', // preserves current behavior for existing users until they opt into tap
   lastPulledAt: null, // ISO string watermark for pullRemoteAttempts; null means "never pulled"
+  // Ongoing preference sync (docs/specs/theme-preferences-sync-investigation.md):
+  // `synced`/`preferencesUpdatedAt` are this record's own equivalents of
+  // attempts' `synced`/watermark, added here rather than as new top-level
+  // fields elsewhere since preferences is a single row, not a log. Records
+  // written before this existed have neither field -- default synced to
+  // true (never retroactively "pending"), same reasoning and same
+  // spread-default mechanism as withSyncedDefault's attempts-side default.
+  synced: true,
+  preferencesUpdatedAt: null, // this device's last-confirmed server updated_at for this row; distinct from lastPulledAt (attempts' own watermark) -- never conflate the two.
 }
 
 async function getPreferencesFor(identity) {
@@ -157,8 +166,7 @@ export async function getPreferences({ identity } = {}) {
   return getPreferencesFor(identity ?? await resolveIdentity())
 }
 
-export async function savePreferences(preferences) {
-  const identity = await resolveIdentity()
+async function savePreferencesFor(preferences, identity) {
   const db = await openDB()
   const t = tx(db, [STORE_PREFERENCES], 'readwrite')
   t.objectStore(STORE_PREFERENCES).put(preferences, identity)
@@ -166,6 +174,84 @@ export async function savePreferences(preferences) {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
   })
+}
+
+// Deliberately NOT the entry point for user/system-facing preference
+// changes (see updatePreferences below) -- this stays a plain, no-push
+// local write, and is exactly the right tool for pullRemoteAttempts' own
+// lastPulledAt-only bookkeeping (storage.js's pullRemoteAttempts), which
+// must never trigger a preferences push: lastPulledAt has no server
+// column, and pushing on every attempts pull would be both wasteful and
+// conceptually wrong (theme-preferences-sync-investigation.md §2).
+export async function savePreferences(preferences) {
+  const identity = await resolveIdentity()
+  return savePreferencesFor(preferences, identity)
+}
+
+/**
+ * Attempts a real-time push of the given preferences state to the
+ * `preferences` table. Unlike puzzle_attempts, this is a single-row upsert
+ * keyed by `profile_id` (that table's own primary key) -- naturally
+ * idempotent with no remoteId/dedup scheme needed at all; retrying the same
+ * upsert just re-writes the same one row (theme-preferences-sync-
+ * investigation.md §2). No-ops (zero network calls) if the account-sync
+ * feature is disabled or there's no active session -- same "flag off means
+ * zero Supabase traffic" principle as pushAttemptIfPossible.
+ *
+ * `synced` transitions to `true` ONLY here, ONLY after a confirmed success
+ * response -- never speculatively, never on request-send. Any error leaves
+ * `synced: false` for the next sync trigger to retry, identical in spirit
+ * to pushAttemptIfPossible's own contract. Re-reads the record fresh
+ * (`getPreferencesFor`) before writing the confirmation back, rather than
+ * reusing the `prefs` object captured when this push started, so a newer
+ * local edit's field values (written to this same record while this push
+ * was in flight) are never clobbered by a stale snapshot.
+ */
+async function pushPreferencesIfPossible(prefs, identity) {
+  if (!ACCOUNT_SYNC_ENABLED) return
+
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) return
+
+  const { data, error } = await supabase
+    .from('preferences')
+    .upsert(
+      { profile_id: session.user.id, app_mode: prefs.appMode, board_theme: prefs.boardTheme, input_mode: prefs.inputMode },
+      { onConflict: 'profile_id' },
+    )
+    .select('updated_at')
+    .single()
+
+  if (error) return // leave synced:false: the next sync trigger retries
+
+  const latest = await getPreferencesFor(identity)
+  await savePreferencesFor({ ...latest, synced: true, preferencesUpdatedAt: data.updated_at }, identity)
+}
+
+/**
+ * The entry point for every user/system-facing preference change
+ * (appMode/boardTheme/inputMode) -- App.jsx's toggleAppMode/
+ * selectBoardTheme/selectInputMode, and its boot effect's one-time
+ * OS-mode-detection write, all call this rather than getPreferences()/
+ * savePreferences() directly. NOT used by pullRemoteAttempts' own
+ * lastPulledAt bookkeeping -- see savePreferences' own comment for why.
+ *
+ * Mirrors recordAttempt's shape: the local write is fully awaited and
+ * committed to IndexedDB BEFORE the fire-and-forget push is dispatched --
+ * this ordering is load-bearing, not stylistic (theme-preferences-sync-
+ * investigation.md's addendum traces exactly why: it's what guarantees a
+ * concurrent read can never observe a stale `synced: true` while a real
+ * local change is actually pending). No cached/reused preferences object
+ * is threaded across calls anywhere here -- every read goes directly to
+ * IndexedDB, preserving that same guarantee.
+ */
+export async function updatePreferences(partial) {
+  const identity = await resolveIdentity()
+  const current = await getPreferencesFor(identity)
+  const prefs = { ...current, ...partial, synced: false }
+  await savePreferencesFor(prefs, identity)
+  pushPreferencesIfPossible(prefs, identity).catch(() => {})
+  return prefs
 }
 
 /**
