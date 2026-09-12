@@ -140,6 +140,18 @@ const DEFAULT_PREFERENCES = {
   // spread-default mechanism as withSyncedDefault's attempts-side default.
   synced: true,
   preferencesUpdatedAt: null, // this device's last-confirmed server updated_at for this row; distinct from lastPulledAt (attempts' own watermark) -- never conflate the two.
+  // Out-of-order-response guard: identifies WHICH local write a push's
+  // eventual success response corresponds to. Two independent code paths
+  // can each have a push in flight for the same pending edit at once --
+  // updatePreferences' own click-triggered push, and syncPreferences'
+  // push-branch retrying that same still-unsynced edit on a foreground/
+  // login trigger -- and either one's response can arrive after a NEWER
+  // edit has already superseded it. `pendingToken` is what
+  // pushPreferencesIfPossible checks, from EITHER path, before flipping
+  // `synced: true`, so a stale response (regardless of which path produced
+  // it) can never mark a fresher, still-actually-unpushed edit as synced.
+  // null means "nothing pending."
+  pendingToken: null,
 }
 
 async function getPreferencesFor(identity) {
@@ -201,13 +213,24 @@ export async function savePreferences(preferences) {
  * `synced` transitions to `true` ONLY here, ONLY after a confirmed success
  * response -- never speculatively, never on request-send. Any error leaves
  * `synced: false` for the next sync trigger to retry, identical in spirit
- * to pushAttemptIfPossible's own contract. Re-reads the record fresh
- * (`getPreferencesFor`) before writing the confirmation back, rather than
- * reusing the `prefs` object captured when this push started, so a newer
- * local edit's field values (written to this same record while this push
- * was in flight) are never clobbered by a stale snapshot.
+ * to pushAttemptIfPossible's own contract.
+ *
+ * `pendingToken` is the out-of-order-response guard, REQUIRED and checked
+ * regardless of which caller supplied it: this function is reachable from
+ * TWO independent code paths -- updatePreferences' own click-triggered
+ * push, and syncPreferences' push-branch retrying an already-pending edit
+ * on a foreground/login trigger -- and either one's response can arrive
+ * after a newer edit has already superseded the one it was for. Before
+ * writing the confirmation back, this re-reads the record fresh
+ * (`getPreferencesFor`, never the `prefs` snapshot captured when this push
+ * started) and only marks `synced: true` if that fresh record's own
+ * `pendingToken` still matches the token THIS push was for. If a newer
+ * local edit has since generated a different token, this response is
+ * stale -- discarded outright, `synced` stays exactly as the newer,
+ * still-genuinely-unsynced edit left it, regardless of which of the two
+ * call paths this particular (now-stale) response came from.
  */
-async function pushPreferencesIfPossible(prefs, identity) {
+async function pushPreferencesIfPossible(prefs, identity, pendingToken) {
   if (!ACCOUNT_SYNC_ENABLED) return
 
   const { data: { session } } = await supabase.auth.getSession()
@@ -225,7 +248,9 @@ async function pushPreferencesIfPossible(prefs, identity) {
   if (error) return // leave synced:false: the next sync trigger retries
 
   const latest = await getPreferencesFor(identity)
-  await savePreferencesFor({ ...latest, synced: true, preferencesUpdatedAt: data.updated_at }, identity)
+  if (latest.pendingToken !== pendingToken) return // superseded by a newer local edit -- discard, do not touch synced
+
+  await savePreferencesFor({ ...latest, synced: true, preferencesUpdatedAt: data.updated_at, pendingToken: null }, identity)
 }
 
 /**
@@ -244,13 +269,19 @@ async function pushPreferencesIfPossible(prefs, identity) {
  * local change is actually pending). No cached/reused preferences object
  * is threaded across calls anywhere here -- every read goes directly to
  * IndexedDB, preserving that same guarantee.
+ *
+ * Generates a fresh `pendingToken` for THIS write specifically -- this is
+ * what lets pushPreferencesIfPossible tell, later, whether its eventual
+ * response is still for the write that's currently pending or for one a
+ * newer edit has since superseded.
  */
 export async function updatePreferences(partial) {
   const identity = await resolveIdentity()
   const current = await getPreferencesFor(identity)
-  const prefs = { ...current, ...partial, synced: false }
+  const pendingToken = crypto.randomUUID()
+  const prefs = { ...current, ...partial, synced: false, pendingToken }
   await savePreferencesFor(prefs, identity)
-  pushPreferencesIfPossible(prefs, identity).catch(() => {})
+  pushPreferencesIfPossible(prefs, identity, pendingToken).catch(() => {})
   return prefs
 }
 
@@ -297,7 +328,14 @@ export async function syncPreferences() {
   const local = await getPreferencesFor(identity)
 
   if (!local.synced) {
-    await pushPreferencesIfPossible(local, identity)
+    // Retrying the SAME still-pending edit, not creating a new one -- pass
+    // its existing pendingToken through unchanged, not a freshly generated
+    // one. This is exactly what lets pushPreferencesIfPossible's guard
+    // treat this retry's eventual response identically to the original
+    // click-triggered push's own response: both carry the same token, so
+    // whichever happens to resolve first correctly confirms the edit, and
+    // the other's (now-redundant, not stale) response is a harmless no-op.
+    await pushPreferencesIfPossible(local, identity, local.pendingToken)
     return
   }
 
