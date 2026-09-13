@@ -229,12 +229,29 @@ export async function savePreferences(preferences) {
  * stale -- discarded outright, `synced` stays exactly as the newer,
  * still-genuinely-unsynced edit left it, regardless of which of the two
  * call paths this particular (now-stale) response came from.
+ *
+ * Identity-pinned guard (docs/specs/identity-pinned-push-guard-investigation.md,
+ * Backlog #1e): `identity` is the caller's already-resolved pin (from
+ * updatePreferences' click-triggered call, or syncPreferences' own
+ * already-resolved value on its retry-branch call) -- not re-derived here.
+ * The `getSession()` call above, by contrast, is necessarily fresh --
+ * same reasoning as pushAttemptIfPossible's own identical guard. If the
+ * two disagree, the live session has moved to a different identity since
+ * this write was queued (only reachable once Logout exists). This case is
+ * more urgent to catch here than on the attempts side: `preferences` is a
+ * single-row upsert with no dedup/append safety net, so proceeding
+ * wouldn't just misattribute a row -- it would directly overwrite whatever
+ * that other account's real settings already were, the instant they log
+ * in. Aborting before the upsert leaves this identity's own record exactly
+ * as if the push hadn't run (`synced: false`, `pendingToken` untouched),
+ * correctly retried the next time this identity's own session is live.
  */
 async function pushPreferencesIfPossible(prefs, identity, pendingToken) {
   if (!ACCOUNT_SYNC_ENABLED) return
 
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
+  if (session.user.id !== identity) return // identity moved on since this write was queued -- leave synced:false for a correctly-scoped retry
 
   const { data, error } = await supabase
     .from('preferences')
@@ -597,12 +614,39 @@ async function markAttemptSynced(localId, remoteId) {
  * violation on that id) therefore means this exact row already landed
  * server-side from an earlier attempt whose success response never made it
  * back to the client -- treated as success, not a failure.
+ *
+ * Identity-pinned guard (docs/specs/identity-pinned-push-guard-investigation.md,
+ * Backlog #1e): `attempt.ownerId` was resolved once, back in recordAttempt,
+ * at the moment this attempt was recorded -- it never changes after that.
+ * This function's own `getSession()` call above, by contrast, is
+ * necessarily re-resolved fresh at execution time (a fire-and-forget push
+ * may run long after the write was queued, and needs a currently-valid
+ * session to authenticate the call at all -- a value pinned at record time
+ * couldn't stand in for that). If the two disagree, the live session has
+ * moved on to a different identity since this attempt was recorded (only
+ * reachable once Logout exists, per the investigation) -- proceeding would
+ * insert this attempt's real data under the WRONG account's profile_id
+ * (RLS does not catch this: profile_id is derived from the same session
+ * authenticating the call, so the write is self-consistent from RLS's own
+ * point of view regardless of whose data it actually is). Aborting here,
+ * before the insert, leaves the row exactly as if this push simply hadn't
+ * run yet (`synced: false`) -- safe and correct, since a future
+ * `flushUnsyncedAttempts()` call, once this row's own identity is live
+ * again, is filtered by `ownerId` and will retry it correctly then. This
+ * also closes a narrower, already-latent version of the same race in the
+ * guest-to-account direction: a guest's `ownerId` is the literal string
+ * `'guest'`, which can never equal a real account's uuid, so a guest
+ * attempt's stray push can no longer land under whichever account happens
+ * to be logging in while it's in flight -- previously possible, and capable
+ * of silently surviving a subsequent Discard (see the investigation for the
+ * full trace).
  */
 async function pushAttemptIfPossible(attempt) {
   if (!ACCOUNT_SYNC_ENABLED) return
 
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
+  if (session.user.id !== attempt.ownerId) return // identity moved on since this attempt was recorded -- leave synced:false for a correctly-scoped retry
 
   const { error } = await supabase.from('puzzle_attempts').insert({
     id: attempt.remoteId,
