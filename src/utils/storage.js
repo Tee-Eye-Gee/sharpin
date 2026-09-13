@@ -337,8 +337,32 @@ export async function updatePreferences(partial) {
  * anything can overwrite it; a genuinely more-recent server-side change
  * (from another device) is picked up whenever this device has nothing of
  * its own pending.
+ *
+ * Identity-checked pull branch (docs/specs/pull-side-identity-race-
+ * investigation.md, Backlog #1f): `identity` (resolved once, above) is the
+ * write target for the pulled data below; the pull branch's own
+ * `getSession()` call, several lines later, is a SEPARATE, necessary
+ * resolution -- unlike pullRemoteAttempts' internal calls, it isn't purely
+ * redundant: it's what authenticates the outbound `preferences` query and
+ * correctly short-circuits the guest case (`identity` alone can be
+ * GUEST_IDENTITY here, since only `local.synced` gates this branch, and a
+ * literal `'guest'` string is nonsense as a `profile_id` filter). If the
+ * two disagree, the live session has moved to a different identity since
+ * `identity` was resolved -- proceeding would write a DIFFERENT account's
+ * real preferences into THIS identity's local record, corrupting it
+ * outright (a single mutable row has no dedup/append safety net the way
+ * attempts does, so there's no safe partial action on a mismatch, only
+ * "don't write"). On a detected mismatch this does not silently give up
+ * forever: it re-resolves and retries once, fresh, within this same
+ * trigger (a plain recursive call re-derives `identity`/`local` from
+ * scratch for whichever identity is now actually live, rather than
+ * patching the in-flight operation with a stale/live data mix) -- bounded
+ * to one retry, so if identity is STILL changing that fast, this defers
+ * cleanly to the next trigger (a fresh login or foreground event, both of
+ * which already re-invoke this function via App.jsx's runSyncSequence)
+ * rather than looping.
  */
-export async function syncPreferences() {
+export async function syncPreferences(retriesLeft = 1) {
   if (!ACCOUNT_SYNC_ENABLED) return
 
   const identity = await resolveIdentity()
@@ -358,6 +382,10 @@ export async function syncPreferences() {
 
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
+  if (session.user.id !== identity) {
+    if (retriesLeft > 0) return syncPreferences(retriesLeft - 1)
+    return // identity churned across both attempts -- defer to the next trigger rather than loop
+  }
 
   const { data, error } = await supabase
     .from('preferences')
@@ -710,6 +738,23 @@ export async function flushUnsyncedAttempts() {
  * conflict on re-push; an untagged one would be invisible to every
  * identity's reads (see the STORE_ATTEMPTS comment above) including the
  * very session that just pulled it.
+ *
+ * Identity-pinning (docs/specs/pull-side-identity-race-investigation.md,
+ * Backlog #1f): `identity` is resolved once, immediately below, from this
+ * function's own `session` -- and threaded explicitly through the dedup
+ * read and the watermark write later in this function, rather than letting
+ * either re-resolve it independently (which is what they did before this
+ * fix, via getAllAttempts()/savePreferences()'s own auto-resolution). This
+ * matters here specifically because both of those calls sit AFTER the
+ * network round-trip immediately below -- a real macrotask-yielding gap a
+ * same-page-load identity switch (once Logout exists) could land inside.
+ * Unlike pushAttemptIfPossible's own guard (a genuine compare-and-abort,
+ * because that function legitimately needs a session re-resolved at
+ * execution time to authenticate its call), neither getAllAttempts nor the
+ * watermark write here has any such need -- they're purely local IndexedDB
+ * operations that only need to know which identity's records to touch, a
+ * fact this function already has. Threading it through eliminates the
+ * divergence rather than merely detecting it.
  */
 export async function pullRemoteAttempts() {
   if (!ACCOUNT_SYNC_ENABLED) return { pulled: 0 }
@@ -717,13 +762,30 @@ export async function pullRemoteAttempts() {
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return { pulled: 0 }
 
+  // `identity` is NOT threaded into the very next call below, on purpose --
+  // confirmed, not assumed, per docs/specs/pull-side-identity-race-
+  // investigation.md §1: the gap between this line and the next has no
+  // network or IndexedDB operation in it, so it's a pure microtask chain.
+  // JS's run-to-completion guarantee means a real browser event (a Logout/
+  // Login click) cannot be processed in between two back-to-back
+  // microtask-only awaits with nothing macrotask-yielding between them --
+  // this specific gap is not reachable by a same-page-load identity
+  // switch. THIS IS A TIME-LIMITED GUARANTEE, NOT A PERMANENT ONE (same
+  // caveat CLAUDE.md already states for adoptLegacyDataIfSafe's own
+  // guest-vs-stranded heuristic): if a future edit inserts a real await
+  // here (a network call, an IndexedDB read/write) between this line and
+  // getPreferences() below, this unreachability claim must be re-verified,
+  // not assumed to still hold -- at that point this call would need the
+  // same explicit `{ identity }` threading the two calls below already
+  // have.
   const prefs = await getPreferences()
+  const identity = session.user.id
   const watermark = prefs.lastPulledAt ?? '1970-01-01T00:00:00.000Z'
 
   const { data, error } = await supabase
     .from('puzzle_attempts')
     .select('id, puzzle_id, themes, solved, hint_used, rating_delta, time_taken_ms, attempted_at, updated_at')
-    .eq('profile_id', session.user.id)
+    .eq('profile_id', identity)
     .gt('updated_at', watermark)
 
   if (error) return { pulled: 0 }
@@ -734,7 +796,9 @@ export async function pullRemoteAttempts() {
   // to avoid on the push side.
   if (data.length === 0) return { pulled: 0 }
 
-  const existingRemoteIds = new Set((await getAllAttempts()).map((a) => a.remoteId))
+  // Pinned to `identity` (above), not re-resolved -- see this function's
+  // own doc comment for why.
+  const existingRemoteIds = new Set((await getAllAttempts({ identity })).map((a) => a.remoteId))
   const newRows = data.filter((row) => !existingRemoteIds.has(row.id))
 
   if (newRows.length > 0) {
@@ -752,7 +816,7 @@ export async function pullRemoteAttempts() {
         at: new Date(row.attempted_at).getTime(),
         synced: true,
         remoteId: row.id,
-        ownerId: session.user.id,
+        ownerId: identity,
       })
     }
     await new Promise((resolve, reject) => {
@@ -772,7 +836,11 @@ export async function pullRemoteAttempts() {
   // already has locally still legitimately confirms the server state up to
   // those rows' timestamps.
   const maxUpdatedAt = data.reduce((max, row) => (row.updated_at > max ? row.updated_at : max), data[0].updated_at)
-  await savePreferences({ ...prefs, lastPulledAt: maxUpdatedAt })
+  // savePreferencesFor (private, identity-pinned) -- NOT the public
+  // savePreferences() wrapper, which would re-resolve identity
+  // independently at exactly the point this fix exists to close. Same
+  // module, no new public surface needed.
+  await savePreferencesFor({ ...prefs, lastPulledAt: maxUpdatedAt }, identity)
 
   return { pulled: newRows.length }
 }
