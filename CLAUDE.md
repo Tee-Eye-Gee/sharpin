@@ -210,27 +210,42 @@ isolation if it matters.
 
 **Backlog status.** Per the investigation's Verification Plan (§5): the
 actual backlog claim — **cross-device** board theme/preference inheritance —
-is fully and meaningfully verifiable, and is considered closed, via **two
-independent Login sessions on the same account in two separate browser
-contexts** (mirroring how attempts' own cross-device pull is already
-verified). This does NOT require logout to exist at all, since it uses Login
-(already shipped) rather than a single-context logout→relogin cycle. What
-remains open, and is explicitly out of scope here, is narrower: **the
-same-device logout→relogin round trip** specifically — confirming a device's
-own preferences survive its own logout/login boundary intact. That is a
+is **closed, live-verified against the real Supabase project** (2026-09-12)
+via **two independent Login sessions on the same account** (no browser
+automation exists in this repo, so this used two separate, independently-
+minted calls to the deployed `verify-move-sequence` Edge Function rather
+than two literal browser contexts — the accepted substitute for this
+specific claim). Session A called the real `updatePreferences` code path
+against the live `preferences` table (TEST_FIXTURE_KEEP,
+`1e119080-4dd7-46be-a56f-9c54ca46c743`) to set `board_theme: 'wood'`, and
+confirmed a synced response; Session B — independently logged in, with its
+local state explicitly reset first so it genuinely started as "a device
+that never locally selected a theme" — called the real `syncPreferences`
+pull path and correctly received `board_theme: 'wood'`. Only the transport
+was substituted (a live `@supabase/supabase-js` client injected in place of
+vitest.config.js's fixture URL/key), never the app's own
+`updatePreferences`/`syncPreferences` functions or query shapes — this
+proves the actual code path, not just hand-written equivalent SQL. The
+one-off verification script was deleted after running (not part of the
+committed suite — it hits real network and a real account, unsuitable for
+regular/CI runs); TEST_FIXTURE_KEEP had no pre-existing `preferences` row
+before this check, so the row this test created was deleted afterward
+(verified empty again), restoring the exact pre-test state rather than
+leaving `'wood'` behind as an undocumented side effect. This did NOT
+require logout to exist at all, since it uses Login (already shipped)
+rather than a single-context logout→relogin cycle. What remains open, and
+is explicitly out of scope here, is narrower: **the same-device
+logout→relogin round trip** specifically — confirming a device's own
+preferences survive its own logout/login boundary intact. That is a
 logout-correctness question, not a cross-device-sync question, and stays
-blocked until Logout (backlog #2) is built; tracked there, not here. Live
-two-context verification against the actual Supabase project (a live-write
-step, per the standing rule on live writes) has not been run as part of this
-build — verification so far is local only (fake-indexeddb + a mocked
-Supabase client): `src/utils/storage.preferencesPush.test.js`,
+blocked until Logout (backlog #2) is built; tracked there, not here.
+Local-only mechanism tests (mocked Supabase client) remain in the
+committed suite: `src/utils/storage.preferencesPush.test.js`,
 `storage.preferencesSync.test.js`, `storage.preferencesOutOfOrder.test.js`.
 
 No other task is currently assigned beyond the above. Candidates for what's
 next: the blocking fix above, the sequence-input design pass (still deferred,
-see above), the live two-context verification of theme/preferences sync
-described above (a live-write step, needs its own before-not-after
-confirmation), backlog #2 (Personal Analytics UI) per the original
+see above), backlog #2 (Personal Analytics UI) per the original
 sequencing call logged in the AccountSync spec (§7), or the Logout/
 Account-reorg work already investigated in
 `docs/specs/logout-and-account-reorg-investigation.md` — subject to the
