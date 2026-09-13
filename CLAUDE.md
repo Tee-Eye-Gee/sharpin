@@ -243,16 +243,102 @@ Local-only mechanism tests (mocked Supabase client) remain in the
 committed suite: `src/utils/storage.preferencesPush.test.js`,
 `storage.preferencesSync.test.js`, `storage.preferencesOutOfOrder.test.js`.
 
+### Identity-pinned sync guards (September 2026, 2-commit build, Backlog #1e/#1f)
+
+Full investigations: `docs/specs/identity-pinned-push-guard-investigation.md`
+(#1e) and `docs/specs/pull-side-identity-race-investigation.md` (#1f), both
+surfaced as byproducts of scoping Logout (backlog #2) — logging out would be
+the first code path able to change which identity is live within a single
+page load, and neither sync system's fire-and-forget push/pull functions
+were built to survive that. **Both commits are built and locally tested;
+neither has been deployed or live-verified against the production Supabase
+project yet — see "Not yet done" below before treating Logout as unblocked.**
+
+**Commit 1/2 — push-side identity-pinned guards (#1e):** `pushAttemptIfPossible`
+and `pushPreferencesIfPossible` both re-resolved "whose data is this" from
+the live session at execution time, not the identity active when the write
+was queued — a same-page-load identity switch (once Logout exists) could
+land an in-flight push under the wrong account. Fixed with a one-line guard
+in each, comparing the freshly-resolved session against a value already
+available (`attempt.ownerId`, pinned at record time; the `identity`
+parameter `pushPreferencesIfPossible` already receives for the
+`pendingToken` guard) — no new parameter threading needed for either. On
+mismatch, aborts before the network call, leaving the row exactly as if the
+push hadn't run yet. This also closes a narrower, already-latent version of
+the same race in the guest-to-account direction (confirmed, not assumed,
+via `storage.pushIdentityGuard.test.js`): a guest attempt's stray push can
+no longer land under whatever account happens to be logging in while it's
+in flight, which could previously survive a subsequent Discard.
+`storage.identity.test.js` (lines 72-102) was re-checked and reconfirmed
+NOT racing this bug (its guest push resolves `session: null` synchronously,
+before the test's own mock switch, per JS's run-to-completion semantics) —
+left unchanged.
+
+**Commit 2/2 — pull-side identity-resolution fix (#1f):** `pullRemoteAttempts`
+resolves identity/session at multiple points within one pull operation;
+`syncPreferences`'s pull branch does too, narrower. Two different fixes, not
+one, matched to what each function's second resolution is actually for:
+- `pullRemoteAttempts`: identity is pinned once (`session.user.id`,
+  immediately after this function's own session check) and threaded through
+  the two calls that sit after this function's real network round-trip —
+  the dedup check (`getAllAttempts({ identity })`, its existing override)
+  and the watermark write (the already-private `savePreferencesFor`
+  directly, not the public `savePreferences`, so no new public surface was
+  needed) — eliminating the divergence rather than detecting it, since
+  neither call has any legitimate reason to re-resolve identity
+  independently. The one resolution point traced as unreachable to this
+  race (`getPreferences`, immediately after the session check — no
+  network/IndexedDB operation between them, a pure microtask chain no
+  browser click can interleave) is deliberately left auto-resolving, with
+  an inline comment at that exact site — flagged there, the same way
+  `adoptLegacyDataIfSafe`'s own guest-vs-stranded heuristic is flagged
+  above, as a **time-limited guarantee**: if a future edit inserts a real
+  `await` between that session check and `getPreferences()`, this
+  unreachability claim must be re-verified, not assumed to still hold.
+- `syncPreferences`'s pull branch: this one's second `getSession()` call
+  genuinely authenticates the outbound query and correctly handles the
+  guest case, so it gets a real compare-and-abort guard instead of
+  elimination — a single mutable row has no dedup/append safety net, so any
+  write under uncertain identity is corruption, not just a duplicate. On a
+  detected mismatch it re-resolves and retries once, fresh, within the same
+  trigger (a bounded recursive call, `retriesLeft` capped at 1) rather than
+  silently dropping forever; if the retry also mismatches, it defers
+  cleanly to the next trigger (a fresh login or foreground event already
+  re-invokes this function via `App.jsx`'s `runSyncSequence`) instead of
+  looping.
+
+Both commits' adversarial cases were run (each fix temporarily reverted,
+confirmed the specific tests then fail for the traced reason, then
+restored): `storage.pushIdentityGuard.test.js`,
+`storage.pullIdentityGuard.test.js`. Full suite: 10 files, 46 tests, all
+passing as of this build.
+
+**Not yet done — do not treat Logout (#2) as unblocked on this basis
+alone:** this build has no UI surface at all (pure `storage.js` logic), so
+there is nothing to smoke-test via DOM interaction or at any viewport width
+— confirmed, not overlooked. What remains is a **live** verification
+against the real Supabase project (mirroring both investigation docs' own
+Level 2 plans: two real accounts, a controllable-timing `fetch` wrapper to
+force the actual race, confirming server-side that no cross-account write
+lands and that a watermark never falsely advances) — this requires a
+production write and has not been run, pending explicit confirmation per
+the standing live-write rule. **Both #1e and #1f stay listed as blocking
+preconditions on Logout until that live verification actually happens and
+this note is updated to reflect it** — built-and-locally-tested is real
+progress, not the same claim as closed.
+
 No other task is currently assigned beyond the above. Candidates for what's
-next: the blocking fix above, the sequence-input design pass (still deferred,
-see above), backlog #2 (Personal Analytics UI) per the original
-sequencing call logged in the AccountSync spec (§7), or the Logout/
-Account-reorg work already investigated in
-`docs/specs/logout-and-account-reorg-investigation.md` — subject to the
-forward-dependency note above if Logout is picked up next. (That doc's own
-backlog numbering for Logout/Account-reorg wasn't reconciled against the
-AccountSync spec's #2/#7 numbering as part of this build — don't assume they
-refer to the same slot without checking.)
+next: the live verification immediately above, the blocking fix under
+storage partitioning above (#1d, `usePuzzleEngine`), the sequence-input
+design pass (still deferred, see above), backlog #2 (Personal Analytics UI)
+per the original sequencing call logged in the AccountSync spec (§7), or
+the Logout/Account-reorg work already investigated in
+`docs/specs/logout-and-account-reorg-investigation.md` and
+`docs/specs/logout-investigation.md` — subject to the forward-dependency
+note above and to #1e/#1f's live-verification gate if Logout is picked up
+next. (The former doc's own backlog numbering for Logout/Account-reorg
+wasn't reconciled against the AccountSync spec's #2/#7 numbering as part of
+that build — don't assume they refer to the same slot without checking.)
 
 ## Explicitly out of scope right now
 - Custom "Sharpin" wordmark/logo design — plain styled text only.
