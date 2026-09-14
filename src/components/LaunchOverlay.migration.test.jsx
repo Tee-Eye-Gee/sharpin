@@ -152,6 +152,37 @@ describe('LaunchOverlay Create Account -> Merge/Discard, with real storage.js + 
     expect(guestAttempts).toHaveLength(0)
   })
 
+  it('does NOT write local profile/themeStats directly -- that gap (Backlog #1g) is closed by storage.js\'s pullProfileStats(), wired into App.jsx\'s runSyncSequence, not by migrateGuestDataToAccount', async () => {
+    await seedGuestAttempt()
+    mockFunctionsInvoke.mockResolvedValue({ data: { session: { access_token: 'at', refresh_token: 'rt' } }, error: null })
+
+    const LaunchOverlay = (await import('./LaunchOverlay')).default
+    const onAuthenticated = vi.fn()
+    render(<LaunchOverlay onGuest={() => {}} onAuthenticated={onAuthenticated} actionsDisabled={false} boardTheme="tournament" />)
+
+    fireEvent.click(screen.getByText('Create Account'))
+    fireEvent.click(screen.getByText('complete-sequence'))
+    await waitFor(() => expect(screen.getByText('Merge')).toBeTruthy())
+
+    fireEvent.click(screen.getByText('Merge'))
+    await waitFor(() => expect(onAuthenticated).toHaveBeenCalledTimes(1))
+
+    // Confirmed, not merely absent (the exact coverage gap Backlog #1g's
+    // investigation found): migrateGuestDataToAccount deliberately does not
+    // write a local profile/themeStats record for the new identity here --
+    // that is App.jsx's runSyncSequence's job now (the login-trigger effect
+    // that fires the render after Merge's own onAuthenticated call), via
+    // storage.js's pullProfileStats(). This test only renders LaunchOverlay
+    // in isolation, so that effect never fires -- see
+    // src/utils/storage.pullProfileStats.test.js for the actual fix's
+    // correctness proof (including the guest-history-survives-Merge
+    // adversarial case), and docs/specs/guest-merge-profile-migration-
+    // investigation.md §2 for why this split, not a Merge-local write, was
+    // the chosen direction.
+    expect((await storage.getProfile()).totalSolved).toBe(0) // still DEFAULT_PROFILE here -- expected, not a regression
+    expect(await storage.getThemeStats()).toEqual({})
+  })
+
   it('Discard clears only GUEST_IDENTITY, never touching the new account\'s (already-empty) namespace', async () => {
     await seedGuestAttempt()
     mockFunctionsInvoke.mockResolvedValue({ data: { session: { access_token: 'at', refresh_token: 'rt' } }, error: null })

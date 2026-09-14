@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts } from './utils/storage'
+import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts, pullProfileStats } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -211,6 +211,17 @@ export default function App() {
       await pullRemoteAttempts()
       await flushUnsyncedAttempts()
       await supabase.rpc('recompute_stats')
+      // Backlog #1g (docs/specs/guest-merge-profile-migration-investigation.md):
+      // pulls the local profile/themeStats aggregate down from what
+      // recompute_stats() just computed server-side -- the missing
+      // counterpart to attempts' own pullRemoteAttempts above. Placed right
+      // after recompute_stats() so the server-side values it reads are
+      // guaranteed fresh for this call. Covers both reachable paths: an
+      // ordinary Login (this effect's own login-trigger condition below)
+      // and guest-to-account Merge (onAuthenticated's setSessionStatus('valid')
+      // call causes this same effect to fire next render -- no separate call
+      // needed inside migrateGuestDataToAccount).
+      await pullProfileStats()
       // Preferences' own sync step, riding this same mutex-guarded
       // login/foreground sequence -- deliberately NOT part of the three
       // attempts steps above (independent store, independent branch logic:

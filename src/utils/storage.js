@@ -846,6 +846,82 @@ export async function pullRemoteAttempts() {
 }
 
 /**
+ * Pulls this identity's server-computed `profile_stats`/`theme_stats`
+ * aggregate down into the local `profile`/`themeStats` stores, overwriting
+ * whatever is there. Backlog #1g
+ * (docs/specs/guest-merge-profile-migration-investigation.md):
+ * `migrateGuestDataToAccount`/`recompute_stats()` correctly write these
+ * tables server-side, but nothing ever pulled them back down locally --
+ * reachable via both the guest-to-account Merge path and an ordinary Login
+ * on any device without a local record for this identity (ordinary Login
+ * only pulls `puzzle_attempts` via `pullRemoteAttempts`, never this).
+ *
+ * Deliberately NOT `syncPreferences`' push/pull-guard shape (`pendingToken`,
+ * an `updated_at`-compare-before-write gate) -- confirmed, not assumed, per
+ * the investigation: `profile_stats`/`theme_stats` have no locally-pending-
+ * edit concept at all. Nothing in this codebase ever writes them via a user
+ * action; they're a pure, wholesale-recomputed derived aggregate, rebuilt
+ * from scratch by `recompute_stats()` every time it runs. A plain
+ * unconditional overwrite is therefore always correct here, not merely
+ * simpler -- there is no local edit a pull could ever clobber, so the
+ * mutual-exclusion machinery `preferences` needs for exactly that reason
+ * would be over-built for a data shape that doesn't have it.
+ *
+ * Identity is resolved once, at the top, and threaded through every
+ * subsequent call (same discipline as #1e/#1f's identity-pinned guards) --
+ * never re-resolved mid-function, even though two separate network round
+ * trips happen after it's captured.
+ *
+ * Safe no-op (leaves local state exactly as it already was) if the feature
+ * is disabled, there's no session, or no `profile_stats` row exists yet for
+ * this identity (e.g. `recompute_stats()` has genuinely never run for this
+ * account) -- matches `syncPreferences`' own "no incoming row is a safe
+ * no-op" posture.
+ */
+export async function pullProfileStats() {
+  if (!ACCOUNT_SYNC_ENABLED) return
+
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) return
+  const identity = session.user.id
+
+  const { data: statsRow, error: statsError } = await supabase
+    .from('profile_stats')
+    .select('rating, current_streak, best_streak, total_solved, total_failed')
+    .eq('profile_id', identity)
+    .maybeSingle()
+  if (statsError || !statsRow) return
+
+  const { data: themeRows, error: themeError } = await supabase
+    .from('theme_stats')
+    .select('theme, attempts, solved')
+    .eq('profile_id', identity)
+  if (themeError) return
+
+  await saveProfile(
+    {
+      rating: statsRow.rating,
+      totalSolved: statsRow.total_solved,
+      totalFailed: statsRow.total_failed,
+      currentStreak: statsRow.current_streak,
+      bestStreak: statsRow.best_streak,
+    },
+    identity,
+  )
+
+  const db = await openDB()
+  const t = tx(db, [STORE_THEME_STATS], 'readwrite')
+  const store = t.objectStore(STORE_THEME_STATS)
+  for (const row of themeRows ?? []) {
+    store.put({ attempts: row.attempts, solved: row.solved }, `${identity}::${row.theme}`)
+  }
+  await new Promise((resolve, reject) => {
+    t.oncomplete = () => resolve()
+    t.onerror = () => reject(t.error)
+  })
+}
+
+/**
  * Record a completed puzzle attempt: updates the attempt log, per-theme
  * accuracy, and the rolling profile (rating/streak/counts) in one place.
  *
