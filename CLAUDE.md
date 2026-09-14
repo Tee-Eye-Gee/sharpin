@@ -91,7 +91,7 @@ rate limiter (3/60min per IP) mid-session.
   live-verification script, treat it as unexplained, not as "the known, already-fixed one."
 
 ## Current task
-Account auth & cross-device sync (backlog #1) is **complete for everything currently scoped**, including ongoing sync (six-commit build, September 2026). Full spec: `docs/specs/Sharpin_Spec_AccountSync.md` — §6 has the as-built sync-trigger design. All build stages — local schema v3, the Supabase backend (schema/RLS/Edge Functions, the `recompute_stats()` RPC, sanity-bound CHECK constraints/`anomaly_log`/reconciliation triggers), and the client (session wiring, launch/Login/Create Account UI, guest-to-account migration, ongoing push/pull/recompute sync) — are built, live-verified, and clean **as of that build**. The storage-partitioning build below (September 2026, separate from and after the six-commit build) touches some of this same client code (`LaunchOverlay.jsx`, `App.jsx`) but has only been verified locally (fake-indexeddb, jsdom, a crafted real-`@supabase/supabase-js` fixture) — not against the live Supabase project. Don't read "live-verified" above as still describing the current state of that touched code.
+Account auth & cross-device sync (backlog #1) is **complete for everything currently scoped**, including ongoing sync (six-commit build, September 2026). Full spec: `docs/specs/Sharpin_Spec_AccountSync.md` — §6 has the as-built sync-trigger design. All build stages — local schema v3, the Supabase backend (schema/RLS/Edge Functions, the `recompute_stats()` RPC, sanity-bound CHECK constraints/`anomaly_log`/reconciliation triggers), and the client (session wiring, launch/Login/Create Account UI, guest-to-account migration, ongoing push/pull/recompute sync) — are built, live-verified, and clean **as of that build**. The storage-partitioning build below (September 2026, separate from and after the six-commit build) touches some of this same client code (`LaunchOverlay.jsx`, `App.jsx`) but has only been verified locally (fake-indexeddb, jsdom, a crafted real-`@supabase/supabase-js` fixture) — not against the live Supabase project. Don't read "live-verified" above as still describing the current state of that touched code. **Also don't read "complete for everything currently scoped" above as covering ordinary multi-device Login** — Backlog #1g (below, 🚩 blocking) found a real correctness gap in this same backlog item: an account's rating/streak/theme-accuracy silently resets to defaults on any device without local history for that identity, not just at the guest-to-account Merge boundary.
 
 **Ongoing sync, summarized** (see spec §6 for full detail): push is real-time — after every attempt, direct authenticated client write to `puzzle_attempts`, with a `synced` flag + `remoteId`-keyed retry queue for offline/failed pushes. Pull runs on login and on app foreground/resume (Page Visibility API), watermarked via `puzzle_attempts.updated_at` (not the client-set `attempted_at`). Both triggers run pull → flush → recompute in the background, guarded by a ref-based mutex so the sequence never runs twice concurrently. `profile_stats`/`theme_stats` are written exclusively by the `recompute_stats()` Postgres RPC (`SECURITY INVOKER`, no parameters, derives identity from `auth.uid()`) — never a client-side upsert, including from the guest-to-account migration, which now calls this same RPC instead of computing values itself. A non-blocking, log-only sanity-check backstop (`anomaly_log`) flags — but never rejects — a mismatch between what's written and what `puzzle_attempts` actually supports. No live cross-device conflict resolution is built (sequential device usage assumed, matching the spec's logged accepted risk). Theme/preferences sync (below) extends this same push/pull pattern to the single-row `preferences` table.
 
@@ -504,18 +504,61 @@ mount-race** (found above) — give it a sync-with-props effect, or gate
 Settings-panel readiness on the `displayName` fetch completing. Not
 blocking anything; not yet assigned a backlog number.
 
-No other task is currently assigned beyond the above. Candidates for what's
-next: the `DisplayNameFields` mount-race immediately above, the blocking
-fix under storage partitioning above (#1d, `usePuzzleEngine` — still open,
-still the one remaining blocking precondition, unrelated to #1e/#1f/#2/#3),
-the sequence-input design pass (still deferred, see above), the "Personal
-Analytics UI" item per the original sequencing call logged in the
-AccountSync spec (§7) — that spec calls it backlog #2, but *this* repo's
-own #2 is Logout, now closed; the two numbering schemes were never
-reconciled, so don't assume the AccountSync spec's #2 and #7 still point
-at the same slot without checking — or Backlog #4 (sequence/credential
-reset, the placeholder Commit 2 left in Settings > Account, still
-unbuilt).
+### Profile/themeStats pull-down missing on login (Backlog #1g, NEW, blocking)
+
+Full investigation: `docs/specs/guest-merge-profile-migration-investigation.md`. Found while
+live-verifying the full guest-to-account adoption flow end-to-end (2026-09-14) against production
+Supabase, reproduced cleanly across two independent throwaway accounts.
+
+**🚩 BLOCKING PRECONDITION — any account login on a device without local history for that
+identity displays incorrect (default) rating/streak/theme-accuracy until this is fixed:**
+`migrateGuestDataToAccount` (`LaunchOverlay.jsx`) correctly migrates `puzzle_attempts` (reassigns
+`ownerId` in place) and remote `preferences`, and calls `recompute_stats()` — but that RPC only
+ever writes server-side `profile_stats`/`theme_stats`; nothing anywhere in `src/` ever pulls those
+back down into the local `profile`/`themeStats` IndexedDB stores (confirmed via a full grep:
+`profile_stats` appears in exactly one place in `src/`, a code comment, never a query). Local
+`preferences` only appears to recover after Merge by coincidence — an unrelated mechanism
+(`syncPreferences`'s pull branch, riding the login-trigger `runSyncSequence`) happens to repopulate
+it; nothing equivalent exists for `profile`/`themeStats`.
+
+**Not scoped to Merge alone** — this is the broader finding that reframed the original report. The
+identical gap fires on ANY ordinary Login where the device has no local `profile`/`themeStats`
+record for that identity — most plainly, an existing account's second device: attempts pull down
+correctly via the already-working `pullRemoteAttempts()`, but rating/streak/theme-accuracy silently
+stay at `DEFAULT_PROFILE`/empty, right next to the correct attempt history. This directly
+contradicts `docs/specs/Sharpin_Spec_AccountSync.md`'s own stated design — **§5's Login flow says
+"On success → pulls account data (rating, streak, needs-work areas) from Supabase," and its
+boot-routing section assumes "account data is already local/cached from the last sync" — neither
+was ever actually implemented; this backlog item closes that specific gap.**
+`docs/specs/storage-partitioning-investigation.md`'s own "second-device scenario" analysis (lines
+652-664) came within one sentence of naming this exact gap and stopped short — it confirmed
+`attempts` recovers via `pullRemoteAttempts()` and concluded the scenario "unaffected," without
+ever checking whether `profile`/`themeStats` recover by any mechanism. They don't.
+
+**Blocks:** the guest-to-account Merge flow cannot be considered correct or ready for real users
+until this is fixed. More broadly, this is a correctness gap in backlog #1 itself — described
+above as "complete for everything currently scoped" — not just an edge case at the Merge boundary.
+
+**Recommended direction (not yet built):** a pull-down for `profile_stats`/`theme_stats` parallel
+to how `preferences` already pulls down, wired into `runSyncSequence` rather than into
+`migrateGuestDataToAccount` alone — the investigation traced a real correctness trap in the
+Merge-only alternative (a naive local recompute on `migrateGuestDataToAccount`'s own retry branch
+would find the guest bucket already emptied by the first successful pass, and overwrite a correct
+local value with defaults) and confirmed the pull-down needs LESS guard complexity than
+preferences' own push/pull mutual-exclusion, since `profile_stats`/`theme_stats` have no
+locally-pending-edit concept to protect against a clobbering pull. Full design tradeoffs:
+investigation §2.
+
+No other task is currently assigned beyond the above. **Two blocking preconditions remain open
+right now, unrelated to each other** (see each section for why no ordering dependency exists
+between them): **#1d** (storage partitioning above, `usePuzzleEngine` — not yet fixed) and **#1g**
+(immediately above, profile/themeStats pull-down on login — not yet fixed). Other candidates for
+what's next: the `DisplayNameFields` mount-race above, the sequence-input design pass (still
+deferred, see above), the "Personal Analytics UI" item per the original sequencing call logged in
+the AccountSync spec (§7) — that spec calls it backlog #2, but *this* repo's own #2 is Logout, now
+closed; the two numbering schemes were never reconciled, so don't assume the AccountSync spec's #2
+and #7 still point at the same slot without checking — or Backlog #4 (sequence/credential reset,
+the placeholder Commit 2 left in Settings > Account, still unbuilt).
 
 ## Explicitly out of scope right now
 - Custom "Sharpin" wordmark/logo design — plain styled text only.
