@@ -61,6 +61,22 @@ rate limiter (3/60min per IP) mid-session.
 - All Supabase client calls go through the single shared instance exported by `src/lib/supabaseClient.js` — don't call `createClient()` anywhere else.
 - The 3-tier launch/auth screen (Guest / Create Account / Login) is `src/components/LaunchOverlay.jsx`, rendered by `App.jsx` only while `sessionStatus === 'none'`. It also owns the guest-to-account migration dialog (Merge/Discard). Its 4-move-sequence input is a temporary placeholder — see "Current task".
 
+## Technical learnings
+- **Mocked test suites can undercount real SDK-internal calls tied to auth-header attachment.**
+  Discovered live-verifying #1e/#1f (2026-09-14): `syncPreferences`'s pull-branch retry path was
+  asserted at exactly 4 `getSession()` calls (2 attempts × 2 calls each) against the local mocked
+  test suite, and that assertion passed. Against the REAL `@supabase/supabase-js` client it was 5
+  — the SDK itself makes its own internal `getSession()` call (`SupabaseClient._getSessionToken`)
+  to attach the current access token's Authorization header whenever an authenticated REST call
+  actually fires. The mocked tests never see this, because their mocked `.from(...)` never calls
+  `getSession()` at all — only the code under test's own explicit calls get counted. **A
+  call-count assertion carried over unchanged from a mock to a live run is not a safe assumption —
+  derive the expected count from what a live, instrumented run actually logs, not from what the
+  mock happened to require.** This is not a bug in the code under test; it's a fidelity gap
+  specific to *this kind* of assertion (counting calls to a method the SDK itself also calls
+  internally) — most other assertion styles (did the right row land, under which identity,
+  server-side) don't have this gap and transfer from mock to live verification directly.
+
 ## Current task
 Account auth & cross-device sync (backlog #1) is **complete for everything currently scoped**, including ongoing sync (six-commit build, September 2026). Full spec: `docs/specs/Sharpin_Spec_AccountSync.md` — §6 has the as-built sync-trigger design. All build stages — local schema v3, the Supabase backend (schema/RLS/Edge Functions, the `recompute_stats()` RPC, sanity-bound CHECK constraints/`anomaly_log`/reconciliation triggers), and the client (session wiring, launch/Login/Create Account UI, guest-to-account migration, ongoing push/pull/recompute sync) — are built, live-verified, and clean **as of that build**. The storage-partitioning build below (September 2026, separate from and after the six-commit build) touches some of this same client code (`LaunchOverlay.jsx`, `App.jsx`) but has only been verified locally (fake-indexeddb, jsdom, a crafted real-`@supabase/supabase-js` fixture) — not against the live Supabase project. Don't read "live-verified" above as still describing the current state of that touched code.
 
@@ -250,9 +266,9 @@ Full investigations: `docs/specs/identity-pinned-push-guard-investigation.md`
 surfaced as byproducts of scoping Logout (backlog #2) — logging out would be
 the first code path able to change which identity is live within a single
 page load, and neither sync system's fire-and-forget push/pull functions
-were built to survive that. **Both commits are built and locally tested;
-neither has been deployed or live-verified against the production Supabase
-project yet — see "Not yet done" below before treating Logout as unblocked.**
+were built to survive that. **Both commits are built, locally tested, and
+now live-verified against the production Supabase project (2026-09-14) —
+closed. Neither is a blocking precondition on Logout (#2) anymore.**
 
 **Commit 1/2 — push-side identity-pinned guards (#1e):** `pushAttemptIfPossible`
 and `pushPreferencesIfPossible` both re-resolved "whose data is this" from
@@ -313,32 +329,64 @@ restored): `storage.pushIdentityGuard.test.js`,
 `storage.pullIdentityGuard.test.js`. Full suite: 10 files, 46 tests, all
 passing as of this build.
 
-**Not yet done — do not treat Logout (#2) as unblocked on this basis
-alone:** this build has no UI surface at all (pure `storage.js` logic), so
-there is nothing to smoke-test via DOM interaction or at any viewport width
-— confirmed, not overlooked. What remains is a **live** verification
-against the real Supabase project (mirroring both investigation docs' own
-Level 2 plans: two real accounts, a controllable-timing `fetch` wrapper to
-force the actual race, confirming server-side that no cross-account write
-lands and that a watermark never falsely advances) — this requires a
-production write and has not been run, pending explicit confirmation per
-the standing live-write rule. **Both #1e and #1f stay listed as blocking
-preconditions on Logout until that live verification actually happens and
-this note is updated to reflect it** — built-and-locally-tested is real
-progress, not the same claim as closed.
+**Live verification (2026-09-14): done, clean, both closed.** This build
+has no UI surface at all (pure `storage.js` logic), so DOM/viewport
+smoke-testing did not apply — confirmed, not overlooked. What did apply was
+a live verification against the real Supabase project, matching both
+investigation docs' own Level 2 plans: `TEST_FIXTURE_KEEP` plus one fresh
+throwaway account, a controllable `getSession()`/`fetch` wrapper around a
+real `@supabase/supabase-js` client to force the exact same-page-load
+identity-switch race, confirmed server-side via direct Postgres reads (not
+client-side inference) for every scenario —
+- **#1e attempts push guard**: an in-flight push queued under A, forced to
+  resolve its own session check as B mid-flight, confirmed to land under
+  *neither* account (not misdirected to B, not silently landed under A
+  either) — then confirmed a real `flushUnsyncedAttempts()` correctly
+  recovers it under A afterward, so nothing is permanently lost.
+- **#1e preferences push guard**: same race; confirmed B's real settings
+  were never overwritten with A's stale values, and A's own server row was
+  byte-for-byte unchanged.
+- **#1f `pullRemoteAttempts`**: confirmed it pulls correctly under the
+  identity pinned at the top of the operation; a live attempt to switch
+  sessions mid-network-call was confirmed to have zero effect (the query
+  filter and auth header are already fixed before the request is
+  dispatched — a positive property of eliminating the divergence rather
+  than detecting it, not a gap in the test).
+- **#1f `syncPreferences` pull branch**: confirmed, via a logged sequence
+  of real `getSession()` calls (not inferred from code), that a detected
+  mismatch actually retries once, fresh, and correctly pulls under
+  whichever identity is live by then, leaving the other identity's record
+  untouched; and separately confirmed that a mismatch on the retry too
+  defers cleanly (bounded to exactly 2 attempts, no write, no hang) rather
+  than dropping silently forever.
+
+Two throwaway accounts were created and fully cleaned up across the two
+live-verification passes (2026-09-12's build pass and 2026-09-14's
+completion pass) — each confirmed via captured console output showing
+empty `puzzle_attempts`/`preferences` after deleting its `profiles` row
+(cascade). `TEST_FIXTURE_KEEP` was confirmed bit-for-bit restored after
+each pass (exact structural equality between the captured before/after
+state, not just "looks empty"). As with the theme/preferences live
+verification, the underlying synthetic `auth.users` row for each throwaway
+cannot be deleted without a service-role key (not present in this
+project's local `.env`) — data-level cleanup only, consistent with this
+project's established practice. The verification scripts themselves were
+one-off, not committed (hit real network and real accounts, unsuitable for
+regular/CI runs), and were deleted after running.
 
 No other task is currently assigned beyond the above. Candidates for what's
-next: the live verification immediately above, the blocking fix under
-storage partitioning above (#1d, `usePuzzleEngine`), the sequence-input
-design pass (still deferred, see above), backlog #2 (Personal Analytics UI)
-per the original sequencing call logged in the AccountSync spec (§7), or
-the Logout/Account-reorg work already investigated in
+next: the blocking fix under storage partitioning above (#1d,
+`usePuzzleEngine` — still open, still the one remaining blocking
+precondition, unrelated to #1e/#1f), the sequence-input design pass (still
+deferred, see above), backlog #2 (Personal Analytics UI) per the original
+sequencing call logged in the AccountSync spec (§7), or the Logout/
+Account-reorg work already investigated in
 `docs/specs/logout-and-account-reorg-investigation.md` and
 `docs/specs/logout-investigation.md` — subject to the forward-dependency
-note above and to #1e/#1f's live-verification gate if Logout is picked up
-next. (The former doc's own backlog numbering for Logout/Account-reorg
-wasn't reconciled against the AccountSync spec's #2/#7 numbering as part of
-that build — don't assume they refer to the same slot without checking.)
+note above if Logout is picked up next (#1e/#1f's own gate is now closed).
+(The former doc's own backlog numbering for Logout/Account-reorg wasn't
+reconciled against the AccountSync spec's #2/#7 numbering as part of that
+build — don't assume they refer to the same slot without checking.)
 
 ## Explicitly out of scope right now
 - Custom "Sharpin" wordmark/logo design — plain styled text only.
