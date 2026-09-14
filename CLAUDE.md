@@ -138,16 +138,23 @@ into the given identity's namespace.
   defers adoption entirely rather than guessing; its absence proceeds
   immediately as a genuine guest.
 
-**Forward dependency — must be re-verified when Logout (backlog #2) is
-next investigated or built:** the guest-vs-stranded-account disambiguation
-above, and the "no session ever existed" reasoning generally, currently rely
-on logout not existing yet (confirmed in both the logout and storage-
-partitioning investigations — no `supabase.auth.signOut()` call exists
-anywhere in `src/`). The moment logout ships, a device can go
-guest → account → logout → guest again, and this adoption routine's
-one-shot, presence-based idempotency needs to be re-checked against that new
-possibility specifically — do not assume the guarantees documented above
-still hold unexamined once a logout path exists.
+**Forward dependency — RESOLVED (2026-09-14): re-verified now that Logout
+(backlog #2) actually shipped, not still an open future task.** This note
+originally said the guest-vs-stranded-account disambiguation above, and the
+"no session ever existed" reasoning generally, relied on logout not
+existing yet, and that a real `supabase.auth.signOut()` call would need to
+reopen this. That call now exists (`App.jsx`'s `handleLogout`) — see the
+Logout section below for the full build. **Re-checked against the actual
+shipped mechanism, per that section's own Gate Step 0: `adoptLegacyDataIfSafe`
+is only ever called from `App.jsx`'s boot effect, which fires exactly once
+per real page mount and cannot be re-triggered by logout (an in-memory SPA
+state reset, not a remount — confirmed concretely against `main.jsx`, see
+Gate Step 0 below).** A device going guest → account → logout → guest
+again within one tab therefore never re-runs the adoption routine at all
+during that session — the one-shot, presence-based idempotency this note
+was worried about is untouched, because logout structurally cannot reach
+the code path that idempotency protects. Nothing here needed to change as
+a result of Logout shipping.
 
 **🚩 BLOCKING PRECONDITION — do not enable `VITE_ENABLE_ACCOUNT_SYNC` for
 any account with pre-existing local legacy history until this is fixed:**
