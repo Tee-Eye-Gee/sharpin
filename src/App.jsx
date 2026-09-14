@@ -85,6 +85,31 @@ export default function App() {
   // 'valid' anyway.
   const [displayName, setDisplayName] = useState(null)
 
+  // Shared between the boot effect below and handleLogout (docs/specs/
+  // logout-investigation.md §2's "logout must explicitly reload preferences
+  // for the newly-resolved identity" requirement) -- extracted so the two
+  // call sites can't silently drift apart. Auto-resolves identity via
+  // getPreferences()/updatePreferences()'s own resolveIdentity() call, same
+  // as the original boot-only version always did; correct for logout too
+  // because it's only ever called AFTER supabase.auth.signOut() has already
+  // resolved, by which point resolveIdentity() genuinely sees no session.
+  const loadAndApplyPreferences = useCallback(async () => {
+    const prefs = await getPreferences()
+    let mode = prefs.appMode
+    if (mode === null) {
+      mode = detectSystemAppMode()
+      // updatePreferences, not savePreferences -- this is a genuine
+      // system-facing preference write (not pullRemoteAttempts' own
+      // watermark bookkeeping), so it should push like any other, per
+      // theme-preferences-sync-investigation.md's write-path enumeration.
+      await updatePreferences({ appMode: mode })
+    }
+    setAppMode(mode)
+    setBoardTheme(prefs.boardTheme)
+    setInputMode(prefs.inputMode)
+    applyTheme(mode, prefs.boardTheme)
+  }, [])
+
   // Boot-time session check, legacy-data adoption, and preferences load --
   // deliberately ONE ordered sequence, not three independent effects racing
   // each other. Storage partitioning
@@ -104,6 +129,18 @@ export default function App() {
   // structurally guaranteed to only ever see a post-adoption world; (3) load
   // preferences, now safe to read under the resolved (and, if applicable,
   // just-adopted) identity.
+  //
+  // Runs via an empty-dependency useEffect -- fires exactly once for the
+  // lifetime of this component. This is load-bearing for
+  // adoptLegacyDataIfSafe's own "once per real page mount" guarantee
+  // (CLAUDE.md, storage-partitioning section): Logout (below) is a plain
+  // in-memory state reset, NOT a remount -- main.jsx renders <App/> once,
+  // unconditionally, with no `key`, so nothing in this component's
+  // lifetime ever causes React to unmount/remount it. Confirmed concretely
+  // before Logout was built (docs/specs/logout-investigation.md Gate Step
+  // 0), not assumed: this effect cannot re-fire as a side effect of
+  // logging out, however many guest/account transitions happen afterward
+  // in the same tab.
   useEffect(() => {
     let cancelled = false
 
@@ -128,27 +165,12 @@ export default function App() {
 
       setSessionStatus(!ACCOUNT_SYNC_ENABLED ? 'disabled' : identity === GUEST_IDENTITY ? 'none' : 'valid')
 
-      const prefs = await getPreferences()
-      if (cancelled) return
-      let mode = prefs.appMode
-      if (mode === null) {
-        mode = detectSystemAppMode()
-        // updatePreferences, not savePreferences -- this is a genuine
-        // system-facing preference write (not pullRemoteAttempts' own
-        // watermark bookkeeping), so it should push like any other, per
-        // theme-preferences-sync-investigation.md's write-path enumeration.
-        await updatePreferences({ appMode: mode })
-      }
-      if (cancelled) return
-      setAppMode(mode)
-      setBoardTheme(prefs.boardTheme)
-      setInputMode(prefs.inputMode)
-      applyTheme(mode, prefs.boardTheme)
+      await loadAndApplyPreferences()
     }
 
     boot()
     return () => { cancelled = true }
-  }, [])
+  }, [loadAndApplyPreferences])
 
   // Fetches the logged-in profile's display_name once a real session
   // exists -- piggybacks on the session's own user id rather than a
@@ -271,6 +293,35 @@ export default function App() {
     return { ok: true }
   }, [])
 
+  // Logout (backlog #2, docs/specs/logout-investigation.md). A plain
+  // in-memory state reset -- NOT a page reload -- per Gate Step 0's
+  // decision, documented above the boot effect and in CLAUDE.md.
+  //
+  // Safe to call with a push/pull genuinely in flight; no flush-before-
+  // logout step is needed. `signOut()` clears the real session
+  // immediately, so any push/pull step that reads `getSession()`
+  // afterward sees no session and no-ops via its own existing guard.
+  // Anything that already read a session before `signOut()` ran is
+  // covered by the identity-pinned guards (#1e/#1f, live-verified): a
+  // push either completes correctly under its original, already-pinned
+  // identity or aborts cleanly on a mismatch -- it can never corrupt
+  // whichever account becomes active next.
+  //
+  // "Logout" and "switch to guest mode" are the same end state (per the
+  // investigation's own finding, since storage partitioning makes the
+  // guest namespace structurally unable to contain a different account's
+  // data) -- this just returns to the launch screen; Play as Guest from
+  // there is the exact same path a fresh boot-with-no-session already
+  // takes, nothing separate to build.
+  const handleLogout = useCallback(async () => {
+    await supabase.auth.signOut()
+    setSession(null)
+    setSessionStatus('none')
+    setDisplayName(null)
+    setLaunchDismissed(false)
+    await loadAndApplyPreferences()
+  }, [loadAndApplyPreferences])
+
   // Puzzle-in-progress gating (Sub-build B2a, corrected after the deadlock
   // fix below). Login and Create Account are disabled only while a REAL
   // in-flight write is possible -- not merely "a puzzle is loaded" (that
@@ -318,6 +369,8 @@ export default function App() {
           loggedIn={sessionStatus === 'valid'}
           displayName={displayName}
           onSaveDisplayName={saveDisplayName}
+          onLogout={handleLogout}
+          logoutDisabled={puzzleAttemptInFlight}
         />
       )}
 
