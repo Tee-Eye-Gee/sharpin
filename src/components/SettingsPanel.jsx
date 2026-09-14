@@ -11,7 +11,7 @@ const INPUT_MODES = [
 // SettingsPanel remounts fresh each time it opens (conditionally rendered
 // in App.jsx), so initializing from the `displayName` prop at mount always
 // reflects the latest saved value without needing a sync effect.
-function ProfileSection({ displayName, onSaveDisplayName }) {
+function DisplayNameFields({ displayName, onSaveDisplayName }) {
   const [value, setValue] = useState(displayName ?? '')
   const [saving, setSaving] = useState(false)
   const [serverError, setServerError] = useState('')
@@ -43,36 +43,79 @@ function ProfileSection({ displayName, onSaveDisplayName }) {
   }
 
   return (
+    <div className="flex flex-col gap-2">
+      <label className="text-xs text-fg-muted" htmlFor="display-name-input">
+        Display name (optional)
+      </label>
+      <input
+        id="display-name-input"
+        type="text"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value)
+          setServerError('')
+          setSaved(false)
+        }}
+        disabled={saving}
+        placeholder="e.g. ChessFan42"
+        className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:border-accent disabled:opacity-50"
+      />
+      {displayedError && <p className="text-xs text-red-400">{displayedError}</p>}
+      {saved && !displayedError && <p className="text-xs text-accent">Saved.</p>}
+      <button
+        onClick={handleSave}
+        disabled={saving || isUnchanged || !clientValidation.ok}
+        className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-sm font-medium text-accent transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+  )
+}
+
+// Account section (Backlog #3 reorg, docs/specs/logout-investigation.md §3):
+// display name (already shipped, moved under this header from its own
+// former "Profile" section), a Backlog #4 placeholder (sequence/credential
+// reset -- deliberately non-functional here, per that backlog item's own
+// scope, not this one), and Logout. Logout is a plain destructive-styled
+// action button, not `OptionButton` -- that primitive's is-this-selected
+// semantics don't fit a one-shot action, matching Board Theme/Piece
+// Movement's own is-selected rows intentionally looking different from
+// this section's action rows.
+function AccountSection({ displayName, onSaveDisplayName, onLogout, logoutDisabled }) {
+  return (
     <section>
       <h3 className="text-xs text-fg-muted uppercase tracking-widest font-medium mb-2">
-        Profile
+        Account
       </h3>
-      <div className="flex flex-col gap-2">
-        <label className="text-xs text-fg-muted" htmlFor="display-name-input">
-          Display name (optional)
-        </label>
-        <input
-          id="display-name-input"
-          type="text"
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value)
-            setServerError('')
-            setSaved(false)
-          }}
-          disabled={saving}
-          placeholder="e.g. ChessFan42"
-          className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:border-accent disabled:opacity-50"
-        />
-        {displayedError && <p className="text-xs text-red-400">{displayedError}</p>}
-        {saved && !displayedError && <p className="text-xs text-accent">Saved.</p>}
-        <button
-          onClick={handleSave}
-          disabled={saving || isUnchanged || !clientValidation.ok}
-          className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-sm font-medium text-accent transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
+      <div className="flex flex-col gap-4">
+        <DisplayNameFields displayName={displayName} onSaveDisplayName={onSaveDisplayName} />
+
+        <div className="flex flex-col gap-2">
+          <span className="text-xs text-fg-muted">Sequence</span>
+          <button
+            disabled
+            title="Coming soon"
+            className="rounded-lg border border-border px-3 py-2 text-sm text-fg-muted text-left opacity-50 cursor-not-allowed"
+          >
+            Change sequence — coming soon
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={onLogout}
+            disabled={logoutDisabled}
+            className="rounded-lg border border-red-400/40 bg-red-400/10 px-3 py-2 text-sm font-medium text-red-400 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Logout
+          </button>
+          {logoutDisabled && (
+            <p className="text-xs text-fg-muted text-center">
+              Logout is available once this puzzle is scored.
+            </p>
+          )}
+        </div>
       </div>
     </section>
   )
@@ -99,6 +142,8 @@ export default function SettingsPanel({
   loggedIn,
   displayName,
   onSaveDisplayName,
+  onLogout,
+  logoutDisabled,
 }) {
   return (
     <>
@@ -158,7 +203,12 @@ export default function SettingsPanel({
         {loggedIn && (
           <>
             <div className="my-4 border-t border-border" />
-            <ProfileSection displayName={displayName} onSaveDisplayName={onSaveDisplayName} />
+            <AccountSection
+              displayName={displayName}
+              onSaveDisplayName={onSaveDisplayName}
+              onLogout={onLogout}
+              logoutDisabled={logoutDisabled}
+            />
           </>
         )}
       </div>
