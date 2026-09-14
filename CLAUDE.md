@@ -374,13 +374,11 @@ project's established practice. The verification scripts themselves were
 one-off, not committed (hit real network and real accounts, unsuitable for
 regular/CI runs), and were deleted after running.
 
-### Logout (Backlog #2) + Settings Account reorg (Backlog #3) — in progress
+### Logout (Backlog #2) + Settings Account reorg (Backlog #3, 3-commit build)
 
-Full investigation: `docs/specs/logout-investigation.md`. Commits 1/3 and 2/3 are
-built, tested, and committed (not pushed — awaiting sign-off); Commit 3
-(display-name round-trip verification) has not run yet, and neither
-Logout nor the reorg is closed until it does and both commits' remaining
-real-DOM/live-write verification is confirmed.
+Full investigation: `docs/specs/logout-investigation.md`. **All three commits
+are built, tested, live-verified, and committed (not pushed — awaiting
+sign-off). Both backlog items closed.**
 
 **Gate Step 0 (required before any logout code was written): resolved and
 concretely re-verified, not assumed — landed as part of Commit 1
@@ -434,38 +432,70 @@ behavior, just relocated), a Backlog #4 placeholder row (sequence/
 credential reset — deliberately non-functional, not scoped here), and
 Logout (a plain destructive-styled button, not `OptionButton`). Board
 Theme/Piece Movement stay untouched and structurally separate, per the
-investigation's finding. Verified via a real running dev server
-(Playwright-driven) at 375px and 1280px in the **logged-out** state only
-so far — no Supabase interaction, confirmed no layout breakage. The
-**logged-in** Account section (Logout button, placeholder row) still needs
-its own real-DOM verification pass against a real session — not yet run.
+investigation's finding.
 
-**Commit 3/3 — round-trip verification: not started.** Login → change
-display name → logout → relogin, confirming the name persists and nothing
-else resets or leaks across the boundary. This is the one remaining item
-closing the backlog's "still pending final round-trip verification" note
-(theme-preferences-sync section above) — board theme no longer needs this
-per that section's own 2026-09-12 live verification; only display name
-does.
+**Commit 3/3 — round-trip verification: done, live-verified (2026-09-14).**
+Login → change display name → logout → relogin, confirmed via a real
+running dev server against `TEST_FIXTURE_KEEP` (session minted through the
+real `verify-move-sequence` Edge Function, injected into the browser rather
+than automating the sequence-board's drag gestures — that input is already
+documented above as a temporary placeholder, not worth building brittle
+automation against): the new name persisted correctly across the real
+`signOut()` → relogin boundary, confirmed both via the rendered input value
+and screenshots. Closes the backlog's "still pending final round-trip
+verification" note (theme/preferences-sync section above) — board theme
+never needed this, per that section's own 2026-09-12 live verification;
+only display name did, and it's now confirmed too. `TEST_FIXTURE_KEEP`'s
+`display_name` was restored to its original value afterward, confirmed via
+a direct read (not just a successful write call).
 
-**Not yet done, do not treat #2/#3 as closed on this basis alone:** the
-logged-in-UI verification for Commit 2 and all of Commit 3 require a real
-session against production Supabase — pending explicit confirmation per
-the standing live-write rule, not yet run as of this note.
+**Two real bugs found during this live-DOM verification pass — this is
+exactly what it's for:**
+1. **Fixed, same pass (`adbaf93`): Logout left the Settings panel open
+   behind the relaunched LaunchOverlay.** `handleLogout` reset session
+   state but never touched `settingsOpen`; since both `LaunchOverlay` and
+   `SettingsPanel` are independent `fixed inset-0` overlays at the same
+   z-index tier, logging out while Settings was open stacked both at once
+   instead of cleanly returning to just the launch screen. Fixed by adding
+   `setSettingsOpen(false)` to `handleLogout`; reconfirmed via a second
+   live run that only the launch screen renders now.
+2. **Found, explicitly NOT fixed — out of this build's scope, needs its own
+   backlog item so it doesn't get lost:** `DisplayNameFields`
+   (`SettingsPanel.jsx`) initializes its input from the `displayName` prop
+   **once, at mount, with no sync-with-props effect** — a deliberate
+   design choice recorded in its own comment, premised on "`SettingsPanel`
+   remounts fresh every time it opens." That premise fails if Settings is
+   opened before the async `displayName` fetch effect (`App.jsx`, keyed on
+   `[sessionStatus, session]`) has resolved: the field mounts with an
+   empty value and — because it never re-syncs — stays empty for as long
+   as that particular panel-open lasts, even after the fetch completes
+   moments later. **Not specific to logout or this build** — reachable
+   from any sufficiently fast click on the gear icon right after any fresh
+   login, confirmed reproducible via a real timed test run (opening
+   Settings immediately after a page reload with a valid session showed
+   this exact empty-field state; adding a short wait for the fetch before
+   opening Settings avoided it). **New backlog item needed**: either give
+   `DisplayNameFields` a sync-with-props effect, or gate Settings-panel
+   readiness on the fetch completing — a real design decision, not a
+   one-line patch to rush through inside this build.
+
+**New backlog item (unnumbered, needs triage): `DisplayNameFields`
+mount-race** (found above) — give it a sync-with-props effect, or gate
+Settings-panel readiness on the `displayName` fetch completing. Not
+blocking anything; not yet assigned a backlog number.
 
 No other task is currently assigned beyond the above. Candidates for what's
-next: the blocking fix under storage partitioning above (#1d,
-`usePuzzleEngine` — still open, still the one remaining blocking
-precondition, unrelated to #1e/#1f), the sequence-input design pass (still
-deferred, see above), backlog #2 (Personal Analytics UI) per the original
-sequencing call logged in the AccountSync spec (§7), or the Logout/
-Account-reorg work already investigated in
-`docs/specs/logout-and-account-reorg-investigation.md` and
-`docs/specs/logout-investigation.md` — subject to the forward-dependency
-note above if Logout is picked up next (#1e/#1f's own gate is now closed).
-(The former doc's own backlog numbering for Logout/Account-reorg wasn't
-reconciled against the AccountSync spec's #2/#7 numbering as part of that
-build — don't assume they refer to the same slot without checking.)
+next: the `DisplayNameFields` mount-race immediately above, the blocking
+fix under storage partitioning above (#1d, `usePuzzleEngine` — still open,
+still the one remaining blocking precondition, unrelated to #1e/#1f/#2/#3),
+the sequence-input design pass (still deferred, see above), the "Personal
+Analytics UI" item per the original sequencing call logged in the
+AccountSync spec (§7) — that spec calls it backlog #2, but *this* repo's
+own #2 is Logout, now closed; the two numbering schemes were never
+reconciled, so don't assume the AccountSync spec's #2 and #7 still point
+at the same slot without checking — or Backlog #4 (sequence/credential
+reset, the placeholder Commit 2 left in Settings > Account, still
+unbuilt).
 
 ## Explicitly out of scope right now
 - Custom "Sharpin" wordmark/logo design — plain styled text only.
