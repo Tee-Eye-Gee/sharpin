@@ -313,12 +313,22 @@ export default function App() {
   // data) -- this just returns to the launch screen; Play as Guest from
   // there is the exact same path a fresh boot-with-no-session already
   // takes, nothing separate to build.
+  //
+  // Closes the Settings panel explicitly -- found via real-DOM
+  // verification, not something the investigation's own analysis
+  // surfaced: `settingsOpen` isn't touched by anything else here, so
+  // without this line, logging out while Settings is open leaves it
+  // rendered behind the now-reappeared LaunchOverlay (both are
+  // independent `fixed inset-0` overlays), stacking two full-screen
+  // backdrops/cards at once instead of cleanly returning to the launch
+  // screen alone.
   const handleLogout = useCallback(async () => {
     await supabase.auth.signOut()
     setSession(null)
     setSessionStatus('none')
     setDisplayName(null)
     setLaunchDismissed(false)
+    setSettingsOpen(false)
     await loadAndApplyPreferences()
   }, [loadAndApplyPreferences])
 
