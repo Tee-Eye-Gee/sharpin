@@ -374,6 +374,85 @@ project's established practice. The verification scripts themselves were
 one-off, not committed (hit real network and real accounts, unsuitable for
 regular/CI runs), and were deleted after running.
 
+### Logout (Backlog #2) + Settings Account reorg (Backlog #3) — in progress
+
+Full investigation: `docs/specs/logout-investigation.md`. Commits 1/3 and 2/3 are
+built, tested, and committed (not pushed — awaiting sign-off); Commit 3
+(display-name round-trip verification) has not run yet, and neither
+Logout nor the reorg is closed until it does and both commits' remaining
+real-DOM/live-write verification is confirmed.
+
+**Gate Step 0 (required before any logout code was written): resolved and
+concretely re-verified, not assumed — landed as part of Commit 1
+(`fcf9ccb`).** The investigation's own §5 risk 5 ("`adoptLegacyDataIfSafe`
+remains correct as-is") was traced under an assumption about how logout
+resets state that couldn't be tested until logout actually existed. Before
+writing any logout code:
+- **Decision:** logout is a plain in-memory SPA state reset — `session`/
+  `sessionStatus`/`displayName`/`launchDismissed` reset via `setState`
+  calls inside `App.jsx` — **not** a full page reload.
+- **Re-verification, concrete, against the actual entry point:**
+  `src/main.jsx` calls `createRoot(...).render(<App />)` exactly once, at
+  module load, unconditionally — no `key` prop, no conditional wrapper,
+  and nothing anywhere in the codebase calls `.render()` a second time or
+  changes what's rendered at the root. React only unmounts/remounts a
+  component when its parent stops rendering it or its `key` changes;
+  neither ever happens to `<App />` here. **This means `App`'s own boot
+  effect (`useEffect(() => {...}, [])`, the sole call site of
+  `adoptLegacyDataIfSafe`) fires exactly once for the entire lifetime of
+  the tab — logout cannot re-trigger it, no matter how many guest/account
+  transitions happen afterward in that same session.** The "once per real
+  page mount" guarantee the adoption routine depends on holds under the
+  chosen mechanism.
+- **Conclusion:** gate passed — proceeding with the in-memory-reset design
+  does not reopen the adoption routine's safety, so Commits 1-3 were not
+  blocked on this. Documented at both call sites in `App.jsx` (the boot
+  effect's own doc comment, and `handleLogout`'s) as well as here.
+
+**Commit 1/3 — Logout mechanics (`fcf9ccb`):** `handleLogout` calls
+`supabase.auth.signOut()`, resets the four pieces of React state named
+above, then explicitly reloads preferences for the newly-resolved (guest)
+identity and re-applies the theme via a new `loadAndApplyPreferences()`
+helper — extracted out of the boot effect itself (rather than duplicated)
+specifically because logout doesn't remount `App`, so nothing else will
+re-run that load automatically. No flush-before-logout step: safe to
+abandon in-flight pushes, now that #1e/#1f's identity-pinned guards are
+live-verified — a push either completes correctly under its already-pinned
+identity or aborts cleanly on a mismatch, and `signOut()` itself makes any
+push that reads `getSession()` afterward see no session and no-op via its
+own pre-existing guard. "Logout" and "switch to guest mode" are confirmed
+the same end state (per the investigation's finding) — this just returns
+to the launch screen. Logout is gated by the same `puzzleAttemptInFlight`
+signal Login/Create Account already use. Tests:
+`src/utils/storage.logoutInFlightPush.test.js` (the exact signOut()-mid-push
+scenario, for both attempts and preferences, adversarial case included per
+the existing project pattern).
+
+**Commit 2/3 — Settings Account reorg (`665b186`):** the logged-in-only
+"Profile" section is now "Account," containing display name (unchanged
+behavior, just relocated), a Backlog #4 placeholder row (sequence/
+credential reset — deliberately non-functional, not scoped here), and
+Logout (a plain destructive-styled button, not `OptionButton`). Board
+Theme/Piece Movement stay untouched and structurally separate, per the
+investigation's finding. Verified via a real running dev server
+(Playwright-driven) at 375px and 1280px in the **logged-out** state only
+so far — no Supabase interaction, confirmed no layout breakage. The
+**logged-in** Account section (Logout button, placeholder row) still needs
+its own real-DOM verification pass against a real session — not yet run.
+
+**Commit 3/3 — round-trip verification: not started.** Login → change
+display name → logout → relogin, confirming the name persists and nothing
+else resets or leaks across the boundary. This is the one remaining item
+closing the backlog's "still pending final round-trip verification" note
+(theme-preferences-sync section above) — board theme no longer needs this
+per that section's own 2026-09-12 live verification; only display name
+does.
+
+**Not yet done, do not treat #2/#3 as closed on this basis alone:** the
+logged-in-UI verification for Commit 2 and all of Commit 3 require a real
+session against production Supabase — pending explicit confirmation per
+the standing live-write rule, not yet run as of this note.
+
 No other task is currently assigned beyond the above. Candidates for what's
 next: the blocking fix under storage partitioning above (#1d,
 `usePuzzleEngine` — still open, still the one remaining blocking
