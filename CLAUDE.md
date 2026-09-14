@@ -76,6 +76,19 @@ rate limiter (3/60min per IP) mid-session.
   specific to *this kind* of assertion (counting calls to a method the SDK itself also calls
   internally) — most other assertion styles (did the right row land, under which identity,
   server-side) don't have this gap and transfer from mock to live verification directly.
+- **Open, deliberately unresolved: a libuv assertion crash** (`Assertion failed:
+  !(handle->flags & UV_HANDLE_CLOSING)`) hit once, in a one-off, since-deleted live-verification
+  scratch script, immediately after a `process.exit(1)` call following an `await fetch(...)`. The
+  likely mechanism (`fetch`'s own handle mid-teardown colliding with an abrupt `process.exit()`)
+  and the applied fix (`process.exitCode` instead) were **never actually verified against a
+  recurrence** — the retry that "confirmed" it fixed ran under different conditions (the rate
+  limit had cleared, so it took the success branch, which never called `process.exit()` even in
+  the original script) and simply never re-exercised the failing branch. Left unresolved on
+  purpose, not silently treated as fixed: the script no longer exists and has no production code
+  path, and its only output (diagnostic console logs) was independently confirmed reliable — fully
+  printed before the crash in every case it happened — so nothing about this affected the
+  trustworthiness of any verification result. If this exact crash resurfaces in a future
+  live-verification script, treat it as unexplained, not as "the known, already-fixed one."
 
 ## Current task
 Account auth & cross-device sync (backlog #1) is **complete for everything currently scoped**, including ongoing sync (six-commit build, September 2026). Full spec: `docs/specs/Sharpin_Spec_AccountSync.md` — §6 has the as-built sync-trigger design. All build stages — local schema v3, the Supabase backend (schema/RLS/Edge Functions, the `recompute_stats()` RPC, sanity-bound CHECK constraints/`anomaly_log`/reconciliation triggers), and the client (session wiring, launch/Login/Create Account UI, guest-to-account migration, ongoing push/pull/recompute sync) — are built, live-verified, and clean **as of that build**. The storage-partitioning build below (September 2026, separate from and after the six-commit build) touches some of this same client code (`LaunchOverlay.jsx`, `App.jsx`) but has only been verified locally (fake-indexeddb, jsdom, a crafted real-`@supabase/supabase-js` fixture) — not against the live Supabase project. Don't read "live-verified" above as still describing the current state of that touched code.
