@@ -89,6 +89,12 @@ rate limiter (3/60min per IP) mid-session.
   printed before the crash in every case it happened — so nothing about this affected the
   trustworthiness of any verification result. If this exact crash resurfaces in a future
   live-verification script, treat it as unexplained, not as "the known, already-fixed one."
+- **npm's default log retention (`logs-max`) is shallow enough that a forensic/artifact-trail question
+  may not be answerable more than a few days after the fact** — confirmed during the artifact-trail
+  integrity audit (2026-09-20), where no npm install log survived from a relevant date only 6 days
+  prior. Worth knowing before relying on npm logs as evidence in the future; this machine's
+  `logs-max` was raised to 50 the same day specifically to give future questions more depth to check
+  against.
 
 ## Current task
 Account auth & cross-device sync (backlog #1) is **complete for everything currently scoped**, including ongoing sync (six-commit build, September 2026). Full spec: `docs/specs/Sharpin_Spec_AccountSync.md` — §6 has the as-built sync-trigger design. All build stages — local schema v3, the Supabase backend (schema/RLS/Edge Functions, the `recompute_stats()` RPC, sanity-bound CHECK constraints/`anomaly_log`/reconciliation triggers), and the client (session wiring, launch/Login/Create Account UI, guest-to-account migration, ongoing push/pull/recompute sync) — are built, live-verified, and clean **as of that build**. The storage-partitioning build below (September 2026, separate from and after the six-commit build) touches some of this same client code (`LaunchOverlay.jsx`, `App.jsx`) but has only been verified locally (fake-indexeddb, jsdom, a crafted real-`@supabase/supabase-js` fixture) — not against the live Supabase project. Don't read "live-verified" above as still describing the current state of that touched code. **Backlog #1g (below) found and closed a real correctness gap in this same backlog item, live-verified 2026-09-14**: an account's rating/streak/theme-accuracy used to silently reset to defaults on any device without local history for that identity (not just at the guest-to-account Merge boundary) — fixed by `pullProfileStats()`, see that section for the full build.
