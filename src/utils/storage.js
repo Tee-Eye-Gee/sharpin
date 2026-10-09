@@ -48,6 +48,18 @@ async function resolveIdentity() {
   return session ? session.user.id : GUEST_IDENTITY
 }
 
+/**
+ * Public read of "whose data would an unscoped storage call touch right
+ * now" -- the same live resolution every auto-resolving function in this
+ * file uses. usePuzzleEngine compares this against the identity a puzzle
+ * was loaded for, so a commit can refuse to write when the two differ
+ * (Backlog #1d, user-change expansion) instead of computing a rating delta
+ * from some other identity's profile.
+ */
+export async function getActiveIdentity() {
+  return resolveIdentity()
+}
+
 let dbPromise = null
 
 function openDB() {
@@ -111,9 +123,26 @@ async function getProfileFor(identity) {
 /**
  * Load the user's profile (rating, streaks, solve counts), creating a
  * default one if this is a first run.
+ *
+ * `identity` override: read a specific identity's record regardless of the
+ * live session -- usePuzzleEngine pins every read/write for one puzzle to
+ * the identity that puzzle was loaded for (Backlog #1d).
  */
-export async function getProfile() {
-  return getProfileFor(await resolveIdentity())
+export async function getProfile({ identity } = {}) {
+  return getProfileFor(identity ?? await resolveIdentity())
+}
+
+/**
+ * Whether this device holds a stored profile record for `identity` at all.
+ * Lets App.jsx tell "DEFAULT_PROFILE because this identity has never
+ * played here" apart from "this device already has this identity's
+ * history" when a post-login stats pull couldn't complete (Backlog #1d).
+ */
+export async function hasLocalProfile(identity) {
+  const db = await openDB()
+  const t = tx(db, [STORE_PROFILE], 'readonly')
+  const result = await reqToPromise(t.objectStore(STORE_PROFILE).get(identity))
+  return result !== undefined
 }
 
 async function saveProfile(profile, identity) {
@@ -507,8 +536,8 @@ function withSyncedDefault(attempt) {
  * Most recent N attempts, newest first — used to weight puzzle selection
  * away from themes the user has just seen.
  */
-export async function getRecentAttempts(limit = 15) {
-  const identity = await resolveIdentity()
+export async function getRecentAttempts(limit = 15, { identity: explicitIdentity } = {}) {
+  const identity = explicitIdentity ?? await resolveIdentity()
   const db = await openDB()
   const t = tx(db, [STORE_ATTEMPTS], 'readonly')
   const all = await reqToPromise(t.objectStore(STORE_ATTEMPTS).getAll())
@@ -877,12 +906,19 @@ export async function pullRemoteAttempts() {
  * this identity (e.g. `recompute_stats()` has genuinely never run for this
  * account) -- matches `syncPreferences`' own "no incoming row is a safe
  * no-op" posture.
+ *
+ * Returns `null` when it did nothing at all (flag off, no session), else
+ * `{ identity, ok }`: `ok: true` once this identity's local profile is known
+ * to match the server (written, or the server genuinely has no row yet),
+ * `ok: false` if either query errored. App.jsx uses this to decide when an
+ * account's profile is ready for puzzle selection and rating math
+ * (Backlog #1d).
  */
 export async function pullProfileStats() {
-  if (!ACCOUNT_SYNC_ENABLED) return
+  if (!ACCOUNT_SYNC_ENABLED) return null
 
   const { data: { session } } = await supabase.auth.getSession()
-  if (!session) return
+  if (!session) return null
   const identity = session.user.id
 
   const { data: statsRow, error: statsError } = await supabase
@@ -890,13 +926,14 @@ export async function pullProfileStats() {
     .select('rating, current_streak, best_streak, total_solved, total_failed')
     .eq('profile_id', identity)
     .maybeSingle()
-  if (statsError || !statsRow) return
+  if (statsError) return { identity, ok: false }
+  if (!statsRow) return { identity, ok: true }
 
   const { data: themeRows, error: themeError } = await supabase
     .from('theme_stats')
     .select('theme, attempts, solved')
     .eq('profile_id', identity)
-  if (themeError) return
+  if (themeError) return { identity, ok: false }
 
   await saveProfile(
     {
@@ -919,6 +956,7 @@ export async function pullProfileStats() {
     t.oncomplete = () => resolve()
     t.onerror = () => reject(t.error)
   })
+  return { identity, ok: true }
 }
 
 /**
@@ -939,10 +977,14 @@ export async function pullProfileStats() {
  * @param {number} params.newRating
  * @param {number} params.ratingDelta
  * @param {number} params.timeTakenMs
+ * @param {string} [params.identity] - write under this identity instead of
+ *   resolving the live session. usePuzzleEngine passes the identity the
+ *   puzzle was loaded for, so its profile read and this write can't
+ *   straddle a user change (Backlog #1d).
  * @returns {Promise<object>} the updated profile
  */
-export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRating, ratingDelta, timeTakenMs }) {
-  const identity = await resolveIdentity()
+export async function recordAttempt({ puzzleId, themes, solved, hintUsed, newRating, ratingDelta, timeTakenMs, identity: explicitIdentity }) {
+  const identity = explicitIdentity ?? await resolveIdentity()
   const db = await openDB()
   const profile = await getProfileFor(identity)
 

@@ -121,7 +121,10 @@ describe('pullProfileStats -- unconditional overwrite of local profile/themeStat
     mockGetSession.mockResolvedValue(sessionOf('acct-1'))
     mockProfileStatsSelect.mockResolvedValue({ data: null, error: null })
 
-    await expect(storage.pullProfileStats()).resolves.toBeUndefined()
+    // Still a no-op locally, but now reports success: "the server has no
+    // stats for this identity" is a known state, so DEFAULT_PROFILE is the
+    // correct profile to compute ratings from (Backlog #1d readiness signal).
+    await expect(storage.pullProfileStats()).resolves.toEqual({ identity: 'acct-1', ok: true })
     expect(mockThemeStatsSelect).not.toHaveBeenCalled() // never even reaches the theme_stats query
     const profile = await storage.getProfile()
     expect(profile.rating).toBe(1200) // DEFAULT_PROFILE, untouched

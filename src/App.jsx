@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePuzzleEngine } from './hooks/usePuzzleEngine'
-import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts, pullProfileStats } from './utils/storage'
+import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts, pullProfileStats, hasLocalProfile } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
 import Header          from './components/Header'
@@ -28,6 +28,15 @@ const HEADLINES = {
 const ACCOUNT_SYNC_ENABLED = import.meta.env.VITE_ENABLE_ACCOUNT_SYNC === 'true'
 
 export default function App() {
+  // Backlog #1d readiness gate for usePuzzleEngine: the identity whose local
+  // profile is ready to drive puzzle selection and rating math, or null
+  // while none is. Guest: set by the boot sequence once adoption has
+  // finished, and again after logout. Account: set only once a sync has
+  // brought that account's stats down (see confirmAccountReady below).
+  // Declared before usePuzzleEngine() because it's that hook's input; the
+  // hook no longer depends on effect registration order at all.
+  const [readyIdentity, setReadyIdentity] = useState(null)
+
   const {
     fen,
     puzzleStartFen,
@@ -49,7 +58,7 @@ export default function App() {
     loadNextPuzzle,
     pressHint,
     retryPuzzle,
-  } = usePuzzleEngine()
+  } = usePuzzleEngine({ readyIdentity })
 
   const [appMode, setAppMode] = useState('dark')
   const [boardTheme, setBoardTheme] = useState(DEFAULT_BOARD_THEME)
@@ -164,6 +173,12 @@ export default function App() {
       if (cancelled) return
 
       setSessionStatus(!ACCOUNT_SYNC_ENABLED ? 'disabled' : identity === GUEST_IDENTITY ? 'none' : 'valid')
+      // Backlog #1d: the guest's profile is final the moment adoption has
+      // returned, so the first puzzle can't be chosen from a defaulted
+      // profile (Race A) or committed against one (Race B). An account
+      // isn't ready yet -- its stats pull hasn't run; the login-trigger
+      // effect below marks it ready.
+      if (identity === GUEST_IDENTITY) setReadyIdentity(GUEST_IDENTITY)
 
       await loadAndApplyPreferences()
     }
@@ -201,12 +216,38 @@ export default function App() {
   // doesn't fire on initial mount" would be correct in the common case but
   // isn't guaranteed across every browser/bfcache-restore scenario, so the
   // lock is the real guarantee, not an assumption.
-  const syncInFlightRef = useRef(false)
+  //
+  // Backlog #1d: a trigger that lands while a run is in flight no longer
+  // just returns -- it queues ONE follow-up run (shared by every caller that
+  // arrives during the same in-flight run) and gets that run's result. A
+  // login right after a logout can land while the previous identity's
+  // sequence is still running; skipping would leave the new account's
+  // stats unpulled and its puzzle board waiting on readiness indefinitely.
+  // Runs are still never concurrent. Resolves to `{ profileStats }`
+  // (pullProfileStats' own result) or null if the sequence threw.
+  const syncInFlightRef = useRef(null)
+  const syncQueuedRef = useRef(null)
 
-  const runSyncSequence = useCallback(async () => {
-    if (!ACCOUNT_SYNC_ENABLED) return
-    if (syncInFlightRef.current) return
-    syncInFlightRef.current = true
+  const runSyncSequence = useCallback(function runSync() {
+    if (!ACCOUNT_SYNC_ENABLED) return Promise.resolve(null)
+    if (syncInFlightRef.current) {
+      if (!syncQueuedRef.current) {
+        syncQueuedRef.current = syncInFlightRef.current.then(() => {
+          syncQueuedRef.current = null
+          return runSync()
+        })
+      }
+      return syncQueuedRef.current
+    }
+    const sequence = runSyncSteps()
+    syncInFlightRef.current = sequence
+    // Registered before any queued follow-up's own .then (above), so the
+    // lock is already released by the time that follow-up starts.
+    sequence.then(() => { syncInFlightRef.current = null })
+    return sequence
+  }, [])
+
+  async function runSyncSteps() {
     try {
       await pullRemoteAttempts()
       await flushUnsyncedAttempts()
@@ -221,7 +262,7 @@ export default function App() {
       // and guest-to-account Merge (onAuthenticated's setSessionStatus('valid')
       // call causes this same effect to fire next render -- no separate call
       // needed inside migrateGuestDataToAccount).
-      await pullProfileStats()
+      const profileStats = await pullProfileStats()
       // Preferences' own sync step, riding this same mutex-guarded
       // login/foreground sequence -- deliberately NOT part of the three
       // attempts steps above (independent store, independent branch logic:
@@ -229,25 +270,50 @@ export default function App() {
       // see syncPreferences' own doc comment in storage.js for why that
       // ordering differs from attempts' and must not be copied).
       await syncPreferences()
+      return { profileStats }
     } catch {
       // Best-effort background sync -- must never surface to the user or
       // block puzzle-board interaction. The next login/foreground trigger
       // retries the whole sequence from scratch.
-    } finally {
-      syncInFlightRef.current = false
+      return null
     }
+  }
+
+  // Backlog #1d: whether `uid`'s local profile can now drive puzzle
+  // selection and rating math, given a finished sync's result. Ready if
+  // that sync's stats pull succeeded for this same uid. If it couldn't
+  // (offline, a query error, the sequence threw), fall back to this
+  // device's own stored record for uid when one exists -- the same profile
+  // offline play has always used. With no record at all, DEFAULT_PROFILE
+  // would only be a guess at an account that may have real history, so it
+  // stays not-ready until a later (foreground) sync gets through.
+  const confirmAccountReady = useCallback(async (uid, result) => {
+    if (result?.profileStats?.ok && result.profileStats.identity === uid) return true
+    return hasLocalProfile(uid)
   }, [])
 
   // Login trigger: fires whenever sessionStatus transitions to 'valid' --
   // covers BOTH the boot-time session-restore effect above (an existing
-  // session found on load) and an interactive Login/Create Account within
-  // this same page load (onAuthenticated below), since both paths funnel
-  // through the same setSessionStatus('valid') call. This is deliberately
-  // the same trigger condition as the displayName-fetch effect above.
+  // session found on load, which includes any session a recovery link
+  // establishes on page load) and an interactive Login/Create Account
+  // within this same page load (onAuthenticated below), since both paths
+  // funnel through the same setSessionStatus('valid') call. This is
+  // deliberately the same trigger condition as the displayName-fetch effect
+  // above. Also the account half of #1d's readiness gate: readiness drops
+  // to null the moment the active user changes (usePuzzleEngine discards
+  // the outgoing user's puzzle), and comes back as this uid only after this
+  // sync has pulled its stats down.
   useEffect(() => {
     if (sessionStatus !== 'valid' || !session) return
-    runSyncSequence()
-  }, [sessionStatus, session, runSyncSequence])
+    const uid = session.user.id
+    let cancelled = false
+    setReadyIdentity((prev) => (prev === uid ? prev : null))
+    runSyncSequence().then(async (result) => {
+      if (cancelled) return
+      if (await confirmAccountReady(uid, result) && !cancelled) setReadyIdentity(uid)
+    })
+    return () => { cancelled = true }
+  }, [sessionStatus, session, runSyncSequence, confirmAccountReady])
 
   // Foreground/resume trigger: Page Visibility API, not a continuous poll.
   // visibilitychange only fires on an actual state transition, never for
@@ -256,14 +322,25 @@ export default function App() {
   // leaving the login trigger above as the sole first-load trigger (the
   // syncInFlightRef lock above is the actual backstop against any
   // browser-specific exception to that).
+  // Also retries readiness: if the login-time sync couldn't confirm this
+  // account's stats, a later foreground sync that does marks it ready.
   useEffect(() => {
     if (sessionStatus !== 'valid' || !session) return
+    const uid = session.user.id
+    let cancelled = false
     function handleVisibilityChange() {
-      if (document.visibilityState === 'visible') runSyncSequence()
+      if (document.visibilityState !== 'visible') return
+      runSyncSequence().then(async (result) => {
+        if (cancelled) return
+        if (await confirmAccountReady(uid, result) && !cancelled) setReadyIdentity(uid)
+      })
     }
     document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
-  }, [sessionStatus, session, runSyncSequence])
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [sessionStatus, session, runSyncSequence, confirmAccountReady])
 
   const toggleAppMode = useCallback(() => {
     setAppMode((prev) => {
@@ -333,8 +410,18 @@ export default function App() {
   // independent `fixed inset-0` overlays), stacking two full-screen
   // backdrops/cards at once instead of cleanly returning to the launch
   // screen alone.
+  //
+  // Backlog #1d: readiness drops to null first, so usePuzzleEngine discards
+  // the account's puzzle before the session goes away, and comes back as
+  // GUEST_IDENTITY only after signOut() has resolved -- by then storage's
+  // live identity is the guest too, so the guest's first puzzle and its
+  // commit both resolve against the guest profile. Analyze mode is exited
+  // because the discarded puzzle was what it was analyzing.
   const handleLogout = useCallback(async () => {
+    setReadyIdentity(null)
+    setAnalyzeMode(false)
     await supabase.auth.signOut()
+    setReadyIdentity(GUEST_IDENTITY)
     setSession(null)
     setSessionStatus('none')
     setDisplayName(null)

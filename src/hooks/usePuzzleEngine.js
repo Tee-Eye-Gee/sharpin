@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { Chess } from 'chess.js'
 import { nearestBands, bandForRating, updateRating } from '../utils/rating'
-import { getProfile, recordAttempt, getRecentAttempts, getAllAttempts } from '../utils/storage'
+import { getActiveIdentity, getProfile, recordAttempt, getRecentAttempts, getAllAttempts } from '../utils/storage'
 import { generateCoachNote } from '../utils/coach'
 
 // Vite code-splits each of these into its own lazily-fetched, content-hashed
@@ -45,7 +45,34 @@ function uciToMove(uci) {
 
 const RECENT_WINDOW = 25 // attempts of lookback for theme-variety weighting + no-repeat
 
-export function usePuzzleEngine() {
+/**
+ * @param {object} [options]
+ * @param {string|null} [options.readyIdentity] - Backlog #1d readiness gate,
+ *   supplied by App.jsx: the identity whose local profile is ready to drive
+ *   puzzle selection and rating math, or null while none is (boot still
+ *   adopting legacy data, or a signed-in account's stats pull still
+ *   pending). Puzzles load only for this identity; when it changes, the
+ *   current puzzle is discarded and a fresh one loads from the new
+ *   identity's band once it's ready. Omitting `options` entirely keeps the
+ *   original ungated behavior (load at mount, identity resolved live) --
+ *   only isolated hook harnesses rely on that; App.jsx always passes it.
+ */
+export function usePuzzleEngine({ readyIdentity } = {}) {
+  const gated = readyIdentity !== undefined
+  // Mirrored into refs during render, not in an effect, so a commit that
+  // races a user change sees the new value immediately.
+  const gatedRef = useRef(gated)
+  gatedRef.current = gated
+  const readyIdentityRef = useRef(readyIdentity)
+  readyIdentityRef.current = readyIdentity
+  // The identity the current puzzle was loaded for. Every profile read and
+  // attempt write for this puzzle is pinned to it, never re-resolved.
+  const puzzleIdentityRef = useRef(null)
+  // Bumped by every load and every discard. Async work captures it and
+  // drops its UI updates if it changed underneath (a stale load can't
+  // install its puzzle over a newer one, a stale finish can't overwrite
+  // the next puzzle's status).
+  const loadGenRef = useRef(0)
   const chessRef = useRef(new Chess())
   const puzzleRef = useRef(null)
   const plyRef = useRef(0)
@@ -129,14 +156,21 @@ export function usePuzzleEngine() {
   }, [])
 
   const loadPuzzle = useCallback(async () => {
+    const gen = ++loadGenRef.current
     setStatus('loading')
     setCoachNote('')
 
-    const profile = await getProfile()
+    const identity = gatedRef.current ? readyIdentityRef.current : await getActiveIdentity()
+    // Not ready: stay in 'loading'. The readiness effect below loads once it is.
+    if (identity == null || gen !== loadGenRef.current) return
+
+    const profile = await getProfile({ identity })
+    if (gen !== loadGenRef.current) return
     setUserRating(profile.rating)
     setStreak(profile.currentStreak)
 
-    const recent = await getRecentAttempts(RECENT_WINDOW)
+    const recent = await getRecentAttempts(RECENT_WINDOW, { identity })
+    if (gen !== loadGenRef.current) return
     const excludeIds = new Set(recent.map((a) => a.puzzleId))
     const recentThemeCounts = {}
     for (const a of recent) {
@@ -146,6 +180,7 @@ export function usePuzzleEngine() {
     let chosen = null
     for (const band of nearestBands(profile.rating)) {
       const puzzles = await loadBand(band.file)
+      if (gen !== loadGenRef.current) return
       chosen = pickWeighted(puzzles, recentThemeCounts, excludeIds)
       if (chosen) break
     }
@@ -153,6 +188,7 @@ export function usePuzzleEngine() {
       // Small-dataset edge case (extreme ratings) — retry the home band
       // ignoring the no-repeat window rather than leaving the user stuck.
       const puzzles = await loadBand(bandForRating(profile.rating).file)
+      if (gen !== loadGenRef.current) return
       chosen = pickWeighted(puzzles, recentThemeCounts, new Set())
     }
     if (!chosen) {
@@ -163,6 +199,7 @@ export function usePuzzleEngine() {
     const chess = new Chess(chosen.fen)
     chessRef.current = chess
     puzzleRef.current = chosen
+    puzzleIdentityRef.current = identity
     attemptCommittedRef.current = false
     hintUsedRef.current = false
     attemptStartedRef.current = false
@@ -205,7 +242,29 @@ export function usePuzzleEngine() {
     attemptCommittedRef.current = true
 
     const puzzle = puzzleRef.current
-    const profile = await getProfile()
+    const identity = puzzleIdentityRef.current
+    // Captured before any await: a discard mid-commit resets the ref.
+    const hintUsed = hintUsedRef.current
+
+    // Backlog #1d commit guard. The rating delta must come from the profile
+    // of the identity this puzzle was loaded for, read once that identity's
+    // profile is ready -- never another identity's profile, and never a
+    // DEFAULT_PROFILE standing in while an account's stats pull is still
+    // pending (App.jsx holds readyIdentity at null until it lands). If any
+    // of that doesn't hold, write nothing: the attempt is abandoned, which
+    // is recoverable, while a wrong delta folds permanently into the
+    // server's summed rating. attemptCommittedRef stays true, so this
+    // puzzle instance can never commit later either.
+    if (!puzzle || identity == null) return
+    if (gatedRef.current && readyIdentityRef.current !== identity) return
+    if ((await getActiveIdentity()) !== identity) return
+    if (puzzleIdentityRef.current !== identity) return // discarded during that await
+
+    // Both calls pinned to `identity`: if the session changes after the
+    // guard above, the attempt still lands under the user who played it,
+    // with that user's delta (and #1e's push guard keeps it off the other
+    // account's server rows).
+    const profile = await getProfile({ identity })
     const { newRating, delta } = updateRating(profile.rating, puzzle.rating, solved)
     const timeTakenMs = Date.now() - startTimeRef.current
 
@@ -213,19 +272,24 @@ export function usePuzzleEngine() {
       puzzleId: puzzle.id,
       themes: puzzle.themes,
       solved,
-      hintUsed: hintUsedRef.current,
+      hintUsed,
       newRating,
       ratingDelta: delta,
       timeTakenMs,
+      identity,
     })
 
+    // The write above is correct regardless; only the display updates are
+    // skipped if the user changed while it ran.
+    if (puzzleIdentityRef.current !== identity) return
     setUserRating(updatedProfile.rating)
     setLastDelta(delta)
     setStreak(updatedProfile.currentStreak)
 
     // Rule-based, fully local — no network call, no API key. Reads the
     // attempt log this same recordAttempt() call just wrote to.
-    const attempts = await getAllAttempts()
+    const attempts = await getAllAttempts({ identity })
+    if (puzzleIdentityRef.current !== identity) return
     setCoachNote(generateCoachNote({ themes: puzzle.themes, solved, profile: updatedProfile, attempts }))
   }, [])
 
@@ -236,7 +300,9 @@ export function usePuzzleEngine() {
   // (spec §4) — commitAttempt no-ops in that case (already committed), but
   // the status shown to the user tracks the actual finish, not the write.
   const finishAttempt = useCallback(async (solved) => {
+    const gen = loadGenRef.current
     await commitAttempt(solved)
+    if (gen !== loadGenRef.current) return // puzzle discarded or replaced meanwhile
     setStatus(solved ? 'solved' : 'failed')
   }, [commitAttempt])
 
@@ -295,7 +361,9 @@ export function usePuzzleEngine() {
     }
 
     setStatus('correct')
+    const gen = loadGenRef.current
     setTimeout(() => {
+      if (gen !== loadGenRef.current) return
       advanceOpponentMove()
       setStatus('solving')
     }, 400)
@@ -354,7 +422,52 @@ export function usePuzzleEngine() {
     setStatus('solving')
   }, [status])
 
-  useEffect(() => { loadPuzzle() }, [loadPuzzle])
+  // Drops the current puzzle without committing anything -- used when the
+  // active identity changes or stops being ready (Backlog #1d). The board
+  // goes back to 'loading' with nothing on it until the next load.
+  const discardPuzzle = useCallback(() => {
+    loadGenRef.current += 1
+    puzzleRef.current = null
+    puzzleIdentityRef.current = null
+    attemptCommittedRef.current = true
+    hintUsedRef.current = false
+    attemptStartedRef.current = false
+    setStatus('loading')
+    setFen(null)
+    setPuzzleStartFen(null)
+    setUserRating(null)
+    setLastDelta(0)
+    setStreak(0)
+    setCurrentThemes([])
+    setPuzzleRating(null)
+    setCoachNote('')
+    setLastMove(null)
+    setIsRetrying(false)
+    setHintTier(0)
+    setHintUsedThisAttempt(false)
+    setAttemptStarted(false)
+  }, [])
+
+  // Ungated (no options passed): original behavior, load once at mount.
+  useEffect(() => {
+    if (!gated) loadPuzzle()
+  }, [gated, loadPuzzle])
+
+  // Gated: load only for a ready identity. Covers boot (#1d proper: no
+  // load until App's adoption step has finished) and every user change
+  // (login, logout, a session restored on page load) -- the outgoing
+  // user's puzzle is discarded, and the incoming user's puzzle is chosen
+  // from their own profile only once it's ready.
+  useEffect(() => {
+    if (!gated) return
+    if (readyIdentity == null) {
+      discardPuzzle()
+      return
+    }
+    if (puzzleIdentityRef.current === readyIdentity) return
+    discardPuzzle()
+    loadPuzzle()
+  }, [gated, readyIdentity, discardPuzzle, loadPuzzle])
 
   // Derived display-only squares for the current tier — recomputed each
   // render from the refs, not stored separately, since hintTier is the only
