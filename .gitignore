@@ -18,6 +18,9 @@ data/raw/
 # Supabase CLI cache
 supabase/.temp/
 
+# Production data exports (real user data -- never commit)
+backups/
+
 # OS / editor
 .DS_Store
 Thumbs.db
