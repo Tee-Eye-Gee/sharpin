@@ -3,8 +3,11 @@ import { usePuzzleEngine } from './hooks/usePuzzleEngine'
 import { GUEST_IDENTITY, adoptLegacyDataIfSafe, getPreferences, updatePreferences, syncPreferences, pullRemoteAttempts, flushUnsyncedAttempts, pullProfileStats, hasLocalProfile } from './utils/storage'
 import { detectSystemAppMode, applyTheme, DEFAULT_BOARD_THEME } from './utils/theme'
 import { supabase } from './lib/supabaseClient'
+import { consumeUrlToken } from './lib/authUrl'
+import { classifyAuthError } from './utils/authErrors'
 import Header          from './components/Header'
 import LaunchOverlay    from './components/LaunchOverlay'
+import FirstSignInPrompt, { shouldOfferGuestMerge } from './components/FirstSignInPrompt'
 import SettingsPanel    from './components/SettingsPanel'
 import Board            from './components/Board'
 import PuzzleControls   from './components/PuzzleControls'
@@ -93,6 +96,12 @@ export default function App() {
   // SettingsPanel's Profile section only renders once sessionStatus is
   // 'valid' anyway.
   const [displayName, setDisplayName] = useState(null)
+  // Auth V2: a signed-in session waiting on the first-sign-in Merge/Discard
+  // answer (FirstSignInPrompt) before it becomes the active session state.
+  const [pendingFirstSignIn, setPendingFirstSignIn] = useState(null)
+  // Why this page load's emailed link didn't sign anyone in (expired or
+  // already used), shown on the launch screen.
+  const [linkError, setLinkError] = useState('')
 
   // Shared between the boot effect below and handleLogout (docs/specs/
   // logout-investigation.md §2's "logout must explicitly reload preferences
@@ -119,6 +128,51 @@ export default function App() {
     applyTheme(mode, prefs.boardTheme)
   }, [])
 
+  // Auth V2: the one way a signed-in session becomes the active session
+  // state -- boot (a stored session, or one a confirm link just created)
+  // and LaunchOverlay's sign-in both come through enterAccount. A new
+  // account's first sign-in on a device with guest history stops at the
+  // Merge/Discard prompt first (decision Q3, see shouldOfferGuestMerge), so
+  // sessionStatus only becomes 'valid' -- which starts the #1d sync and
+  // readiness sequence below -- once that's answered. While the prompt is
+  // up, the live session is already the account's, so the #1d commit
+  // guard keeps any guest commit from landing under it.
+  const activateAccount = useCallback((newSession) => {
+    setPendingFirstSignIn(null)
+    setSession(newSession)
+    setSessionStatus('valid')
+    setLaunchDismissed(true)
+    setLinkError('')
+  }, [])
+
+  const enterAccount = useCallback(async (newSession) => {
+    if (await shouldOfferGuestMerge(newSession)) {
+      setPendingFirstSignIn(newSession)
+      return
+    }
+    activateAccount(newSession)
+  }, [activateAccount])
+
+  // Calls update-profile (server-side is the actual enforcement point for
+  // the spec's validation rules -- SettingsPanel's own client-side check is
+  // just immediate feedback, same two-layer design as Create Account).
+  // Returns { ok, error? } rather than throwing so SettingsPanel can show
+  // the specific rejection reason inline instead of a generic failure.
+  // Declared above the display-name effect, which also uses it.
+  const saveDisplayName = useCallback(async (newName) => {
+    const { data, error } = await supabase.functions.invoke('update-profile', {
+      body: { displayName: newName },
+    })
+    if (error) {
+      const message = error.context?.status === 400
+        ? (await error.context.json().catch(() => null))?.error
+        : null
+      return { ok: false, error: message ?? 'Something went wrong -- try again.' }
+    }
+    setDisplayName(data.displayName)
+    return { ok: true }
+  }, [])
+
   // Boot-time session check, legacy-data adoption, and preferences load --
   // deliberately ONE ordered sequence, not three independent effects racing
   // each other. Storage partitioning
@@ -139,6 +193,12 @@ export default function App() {
   // preferences, now safe to read under the resolved (and, if applicable,
   // just-adopted) identity.
   //
+  // Auth V2: step (1) first consumes this page load's emailed link, if any
+  // (src/lib/authUrl.js -- verified once per page load, before
+  // getSession(), so a confirm link's new session is what getSession()
+  // then returns). An account identity then goes through enterAccount
+  // instead of straight to 'valid'.
+  //
   // Runs via an empty-dependency useEffect -- fires exactly once for the
   // lifetime of this component. This is load-bearing for
   // adoptLegacyDataIfSafe's own "once per real page mount" guarantee
@@ -155,13 +215,19 @@ export default function App() {
 
     async function boot() {
       let identity
+      let accountSession = null
       if (!ACCOUNT_SYNC_ENABLED) {
         identity = GUEST_IDENTITY
       } else {
+        const urlResult = await consumeUrlToken()
+        if (cancelled) return
+        if (urlResult && !urlResult.ok && !urlResult.skipped) {
+          setLinkError(classifyAuthError(urlResult.error).message)
+        }
         const { data } = await supabase.auth.getSession()
         if (cancelled) return
         identity = data.session ? data.session.user.id : GUEST_IDENTITY
-        if (data.session) setSession(data.session)
+        accountSession = data.session
       }
 
       // See adoptLegacyDataIfSafe's own doc comment (storage.js) for the
@@ -172,7 +238,12 @@ export default function App() {
       await adoptLegacyDataIfSafe(identity)
       if (cancelled) return
 
-      setSessionStatus(!ACCOUNT_SYNC_ENABLED ? 'disabled' : identity === GUEST_IDENTITY ? 'none' : 'valid')
+      if (!ACCOUNT_SYNC_ENABLED) setSessionStatus('disabled')
+      else if (identity === GUEST_IDENTITY) setSessionStatus('none')
+      else {
+        await enterAccount(accountSession)
+        if (cancelled) return
+      }
       // Backlog #1d: the guest's profile is final the moment adoption has
       // returned, so the first puzzle can't be chosen from a defaulted
       // profile (Race A) or committed against one (Race B). An account
@@ -185,7 +256,7 @@ export default function App() {
 
     boot()
     return () => { cancelled = true }
-  }, [loadAndApplyPreferences])
+  }, [loadAndApplyPreferences, enterAccount])
 
   // Fetches the logged-in profile's display_name once a real session
   // exists -- piggybacks on the session's own user id rather than a
@@ -193,6 +264,15 @@ export default function App() {
   // fresh Create Account/Login after this component's already mounted),
   // not just on the sessionStatus transition, so a later login within the
   // same page load still picks up the right row.
+  //
+  // Auth V2 (spec §5, first sign-in): the display name chosen at sign-up
+  // travels in user_metadata (signUp's options.data), because the profiles
+  // row is created by a trigger with no name. If the row has no name and
+  // the metadata does, it's set through update-profile, the same path
+  // Settings uses; on success the metadata copy is cleared, so a name the
+  // user later removes in Settings isn't put back at their next sign-in.
+  // Runs at most once per account per page load.
+  const displayNameFixupRef = useRef(new Set())
   useEffect(() => {
     if (sessionStatus !== 'valid' || !session) return
     let cancelled = false
@@ -201,12 +281,17 @@ export default function App() {
       .select('display_name')
       .eq('id', session.user.id)
       .single()
-      .then(({ data, error }) => {
-        if (cancelled) return
-        if (!error) setDisplayName(data.display_name)
+      .then(async ({ data, error }) => {
+        if (cancelled || error) return
+        setDisplayName(data.display_name)
+        const metadataName = session.user.user_metadata?.display_name
+        if (data.display_name || !metadataName || displayNameFixupRef.current.has(session.user.id)) return
+        displayNameFixupRef.current.add(session.user.id)
+        const result = await saveDisplayName(metadataName)
+        if (result.ok) await supabase.auth.updateUser({ data: { display_name: null } })
       })
     return () => { cancelled = true }
-  }, [sessionStatus, session])
+  }, [sessionStatus, session, saveDisplayName])
 
   // Ongoing sync (backlog #1 continuation, Commit 4): pull -> flush -> recompute,
   // run on both login and foreground/resume. A ref-based lock, not just the
@@ -294,10 +379,10 @@ export default function App() {
 
   // Login trigger: fires whenever sessionStatus transitions to 'valid' --
   // covers BOTH the boot-time session-restore effect above (an existing
-  // session found on load, which includes any session a recovery link
-  // establishes on page load) and an interactive Login/Create Account
-  // within this same page load (onAuthenticated below), since both paths
-  // funnel through the same setSessionStatus('valid') call. This is
+  // session found on load, which includes one a confirm link created this
+  // page load) and an interactive sign-in within this same page load
+  // (onAuthenticated below), since both paths funnel through enterAccount's
+  // same setSessionStatus('valid') call. This is
   // deliberately the same trigger condition as the displayName-fetch effect
   // above. Also the account half of #1d's readiness gate: readiness drops
   // to null the moment the active user changes (usePuzzleEngine discards
@@ -362,25 +447,6 @@ export default function App() {
     updatePreferences({ inputMode: mode })
   }, [])
 
-  // Calls update-profile (server-side is the actual enforcement point for
-  // the spec's validation rules -- SettingsPanel's own client-side check is
-  // just immediate feedback, same two-layer design as Create Account).
-  // Returns { ok, error? } rather than throwing so SettingsPanel can show
-  // the specific rejection reason inline instead of a generic failure.
-  const saveDisplayName = useCallback(async (newName) => {
-    const { data, error } = await supabase.functions.invoke('update-profile', {
-      body: { displayName: newName },
-    })
-    if (error) {
-      const message = error.context?.status === 400
-        ? (await error.context.json().catch(() => null))?.error
-        : null
-      return { ok: false, error: message ?? 'Something went wrong -- try again.' }
-    }
-    setDisplayName(data.displayName)
-    return { ok: true }
-  }, [])
-
   // Logout (backlog #2, docs/specs/logout-investigation.md). A plain
   // in-memory state reset -- NOT a page reload -- per Gate Step 0's
   // decision, documented above the boot effect and in CLAUDE.md.
@@ -417,10 +483,14 @@ export default function App() {
   // live identity is the guest too, so the guest's first puzzle and its
   // commit both resolve against the guest profile. Analyze mode is exited
   // because the discarded puzzle was what it was analyzing.
+  //
+  // Auth V2 D14 (decision Q7): scope 'local' ends only this device's
+  // session. supabase-js's default scope is 'global', which would sign the
+  // account out on every device.
   const handleLogout = useCallback(async () => {
     setReadyIdentity(null)
     setAnalyzeMode(false)
-    await supabase.auth.signOut()
+    await supabase.auth.signOut({ scope: 'local' })
     setReadyIdentity(GUEST_IDENTITY)
     setSession(null)
     setSessionStatus('none')
@@ -454,16 +524,20 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
-      {sessionStatus === 'none' && !launchDismissed && (
+      {sessionStatus === 'none' && !launchDismissed && !pendingFirstSignIn && (
         <LaunchOverlay
           onGuest={() => setLaunchDismissed(true)}
-          onAuthenticated={(newSession) => {
-            setSession(newSession)
-            setSessionStatus('valid')
-            setLaunchDismissed(true)
-          }}
+          onAuthenticated={enterAccount}
           actionsDisabled={puzzleAttemptInFlight}
           boardTheme={boardTheme}
+          linkError={linkError}
+        />
+      )}
+
+      {pendingFirstSignIn && (
+        <FirstSignInPrompt
+          session={pendingFirstSignIn}
+          onResolved={() => activateAccount(pendingFirstSignIn)}
         />
       )}
 

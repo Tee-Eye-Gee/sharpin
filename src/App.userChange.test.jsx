@@ -5,7 +5,7 @@ import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-libra
 import { bandForRating, updateRating } from './utils/rating'
 
 // Backlog #1d, user-change expansion: when the active user changes (login,
-// logout, a session restored on page load such as a recovery link's), the
+// logout, a session created on page load such as a confirm link's), the
 // outgoing user's puzzle is discarded, and the incoming user's puzzle and
 // rating math come from their own profile only once it's ready -- for an
 // account, after pullProfileStats has landed. Real App + usePuzzleEngine +
@@ -25,6 +25,10 @@ const accountSession = { user: { id: ACCOUNT_ID }, access_token: 'at', refresh_t
 let currentSession = null
 let profileStatsResult = null // () => Promise<{ data, error }>
 let remoteInserts = []
+let signOutCalls = []
+// What this page load's emailed link did (src/lib/authUrl.js's
+// consumeUrlToken), stubbed: () => Promise<result | null>.
+let urlTokenResult = () => Promise.resolve(null)
 
 function deferred() {
   let resolve
@@ -56,12 +60,13 @@ vi.mock('./lib/supabaseClient', () => ({
   supabase: {
     auth: {
       getSession: () => Promise.resolve({ data: { session: currentSession } }),
-      signOut: () => { currentSession = null; return Promise.resolve({ error: null }) },
+      signOut: (options) => { signOutCalls.push(options); currentSession = null; return Promise.resolve({ error: null }) },
     },
     from: (table) => builder(table),
     rpc: () => Promise.resolve({ error: null }),
   },
 }))
+vi.mock('./lib/authUrl', () => ({ consumeUrlToken: () => urlTokenResult() }))
 vi.mock('./components/Board', () => ({
   default: ({ fen, status }) => <div data-testid="board" data-fen={fen ?? ''} data-status={status} />,
 }))
@@ -162,6 +167,8 @@ const accountStatsRow = {
 beforeEach(async () => {
   currentSession = null
   remoteInserts = []
+  signOutCalls = []
+  urlTokenResult = () => Promise.resolve(null)
   profileStatsResult = () => Promise.resolve(accountStatsRow)
   await withStores((t) => { for (const s of STORES) t.objectStore(s).clear() })
   await withStores((t) => {
@@ -213,8 +220,10 @@ describe('Backlog #1d user change: logout', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Logout' }))
 
     await waitForPuzzleFrom(GUEST_RATING)
-    console.log('[logout] after: displayed', displayedRating(), '| puzzle', displayedPuzzleRating())
+    console.log('[logout] after: displayed', displayedRating(), '| puzzle', displayedPuzzleRating(), '| signOut args', JSON.stringify(signOutCalls))
     expect(currentSession).toBeNull()
+    // Auth V2 D14 (decision Q7): this device only; other devices stay signed in.
+    expect(signOutCalls).toEqual([{ scope: 'local' }])
   })
 })
 
@@ -251,12 +260,20 @@ describe('Backlog #1d commit guard', () => {
   })
 })
 
-describe('Backlog #1d user change: session restored on page load (recovery-link sign-in)', () => {
+describe('Backlog #1d user change: session created on page load by a confirm link', () => {
   it('no puzzle until the account stats pull lands, then the account band -- never a default-band puzzle', async () => {
-    // A recovery (or any emailed) link opens a fresh page load: supabase-js
-    // stores the session from the URL during client init, so App's boot
-    // getSession() already returns it. That is the path this exercises.
-    currentSession = accountSession
+    // Auth V2: a confirm link opens a fresh page load at
+    // /?token_hash=&type=email. supabase-js does NOT pick that up by itself
+    // (detectSessionInUrl is off and token_hash isn't a URL-session param
+    // anyway); App's boot consumes it via authUrl.js, whose verifyOtp saves
+    // the session, so the boot's following getSession() returns it. This
+    // stub models exactly that hand-off. (A recovery link is deliberately
+    // NOT this path: it must never become an ordinary signed-in session --
+    // step 2b.)
+    urlTokenResult = () => {
+      currentSession = accountSession
+      return Promise.resolve({ type: 'email', ok: true, skipped: false, session: accountSession, error: null })
+    }
     const pendingPull = deferred()
     profileStatsResult = () => pendingPull.promise
     render(<App />)

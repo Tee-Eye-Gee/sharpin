@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { BOARD_THEMES, DEFAULT_BOARD_THEME } from '../utils/theme'
+import { hashSequence } from '../utils/sequenceHash'
 
 // Anderssen vs. Kieseritzky, "The Immortal Game" (1851), the position after
 // 11...cxb5 -- fixed identically for every attempt (Create Account and
@@ -38,13 +39,6 @@ function fenToPosition(fen) {
 }
 
 const START_POSITION = fenToPosition(START_FEN)
-
-// Carried over unchanged from the placeholder this component replaces.
-async function hashSequence(raw) {
-  const data = new TextEncoder().encode(raw)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
 
 /**
  * Board-gesture sequence input (spec: docs/specs/Sharpin_Spec_SequenceInput.md).
