@@ -931,8 +931,42 @@ data migration. One commit per item.
   `https://sharpin-your-game.vercel.app/**`. Vercel preview redirects (checklist item C4) skipped,
   so auth links don't work on preview deployments.
 - Rate limits at defaults: sign-ups/sign-ins 30 per 5 min, token refreshes 150 per 5 min.
-- **Not yet configured:** custom SMTP (Resend) and the email templates. Until then the built-in
-  mailer only sends to team members, about 2 per hour.
+- Rate limits match D13 as-is: the 30 per 5 min is the sign-ups/sign-ins limit; the 150 is token
+  refreshes, intended. No config change.
+
+**Email setup, applied 2026-10-10:**
+- Custom SMTP via Resend is live. Sender: `Sharpin <no-reply@sharpin.somewhatextemporaneous.com>`.
+- Both templates link to the **site root** with query params; there is no dedicated route:
+  - Confirm signup: `{SiteURL}/?token_hash=<hash>&type=email`
+  - Reset password: `{SiteURL}/?token_hash=<hash>&type=recovery`
+- The client reads these on boot and calls `supabase.auth.verifyOtp({ token_hash, type })`. No PKCE,
+  no Vercel rewrite.
+- **Planned (Tiggs, dashboard, after step 2a):** switch both templates from `{{ .SiteURL }}` to
+  `{{ .RedirectTo }}`. The client already passes `emailRedirectTo: window.location.origin` on
+  `signUp` and `resend`. GoTrue resolves `RedirectTo` as: explicit `redirect_to` (if allowlisted) →
+  the request's `Referer` header (if allowlisted) → Site URL. Evidence and source links are in
+  `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`, "Q2 evidence".
+- Test-user log: `e16eae92-cf3e-45cd-bf84-95ff64ded354` created and deleted 2026-10-10;
+  `auth.users` back to 2.
+
+**Step 2 decisions (2026-10-10), from `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`:**
+- Q1: the separator is ASCII `|` (U+007C). `hashSequence` is unchanged; TEST_FIXTURE_KEEP's stored
+  hash matches it, which D8 depends on.
+- Q2: templates move to `{{ .RedirectTo }}` (above); the client passes `emailRedirectTo`.
+- Q3: offer Merge/Discard only if local guest attempts > 0 AND remote `puzzle_attempts` = 0 AND
+  `user_metadata.guest_merge_resolved !== true`. Set the flag **only** when the user picks Merge or
+  Discard, never because a device has no guest data. A confirm link opened in a phone's in-app
+  browser must not suppress the later offer on the device that has the guest history.
+- Q4 (2b): recovery Cancel signs out locally; a reload with the pending marker returns to the
+  recovery view; the marker is cleared on uid mismatch and on logout.
+- Q5: `email_not_confirmed` shows "Confirm your email first. Check your inbox." plus a "Resend
+  confirmation email" button (`auth.resend({ type: 'signup', email, options: { emailRedirectTo } })`).
+- Q6 (2b): "Signed in as" goes in Settings → Account only.
+- Q7: Logout uses `signOut({ scope: 'local' })` (D14), shipped in step 2a.
+- Q8: `createClient` passes `auth: { detectSessionInUrl: false }`.
+- Q9 (2b): an `updateUser` failure after a correct current sequence shows an error and keeps the session.
+- Step 2 is split: **2a "Get in"** (sign-up, confirm link, sign-in, resend, first-sign-in
+  Merge/Discard, logout scope) and **2b** (forgot/recovery, change sequence, "Signed in as").
 
 **Client build note — change-sequence:** the `signInWithPassword` call that verifies the current
 sequence must also provide the session `updateUser` runs on. A4 requires a session under 24 hours
