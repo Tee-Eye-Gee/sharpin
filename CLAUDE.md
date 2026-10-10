@@ -74,7 +74,7 @@ rate limiter (3/60min per IP) mid-session.
 - All storage access goes through `src/utils/storage.js` — don't touch IndexedDB directly from components. Includes `resetAllLocalData({ identity })` (reset of **one identity's** data across all four local stores back to defaults — a per-identity cursor-based delete, not a wholesale store `.clear()`, since a device can legitimately hold more than one identity's data side by side post-partitioning; used by the guest-to-account migration's Discard path, always called with `{ identity: GUEST_IDENTITY }` explicitly; irreversible).
 - `Board.jsx`'s `handlePieceDrop` (move-commit logic) was recently fixed for an underpromotion bug — the piece-choice argument was being silently discarded. Any change touching move input must call this same function, not fork a parallel path.
 - All Supabase client calls go through the single shared instance exported by `src/lib/supabaseClient.js` — don't call `createClient()` anywhere else.
-- The 3-tier launch/auth screen (Guest / Create Account / Login) is `src/components/LaunchOverlay.jsx`, rendered by `App.jsx` only while `sessionStatus === 'none'`. It also owns the guest-to-account migration dialog (Merge/Discard). Its sequence input is `SequenceBoardInput.jsx` (board gestures). **Its Login/Create Account handlers still call the undeployed V1 functions**, so dev login and account creation fail until the Auth V2 client UI step replaces them.
+- The 3-tier launch/auth screen (Guest / Create Account / Sign in) is `src/components/LaunchOverlay.jsx`, rendered by `App.jsx` only while `sessionStatus === 'none'`. Auth V2 (step 2a): email + board-drawn sequence via `supabase.auth.signUp`/`signInWithPassword`/`resend`; sign-up confirms the sequence by drawing it twice (`SequenceConfirmInput.jsx`); its sequence input is `SequenceBoardInput.jsx` (board gestures), hashing via `src/utils/sequenceHash.js`. Auth error copy lives in `src/utils/authErrors.js`. The guest-to-account Merge/Discard dialog moved to `FirstSignInPrompt.jsx`, which `App.jsx` shows from its `enterAccount` funnel on a new account's first sign-in (decision Q3). Emailed links (`?token_hash=&type=`) are consumed once per page load by `src/lib/authUrl.js` before the boot's `getSession()`.
 
 ## Technical learnings
 - **Mocked test suites can undercount real SDK-internal calls tied to auth-header attachment.**
@@ -967,6 +967,13 @@ data migration. One commit per item.
 - Q9 (2b): an `updateUser` failure after a correct current sequence shows an error and keeps the session.
 - Step 2 is split: **2a "Get in"** (sign-up, confirm link, sign-in, resend, first-sign-in
   Merge/Discard, logout scope) and **2b** (forgot/recovery, change sequence, "Signed in as").
+
+**Step 2a — client "Get in" (branch `auth-v2-step2a`, 2026-10-10): built, unit-tested, local
+commits only. Not pushed; the UI commit needs Tiggs's visual sign-off. Not live-verified.**
+- `authUrl.js` verifies only `type=email` in 2a; `type=recovery` links are stripped but not
+  verified, so the forgot-sequence link does nothing until 2b.
+- Mutation-checked: setting the Q3 flag on a no-offer sign-in, dropping the run-once memo, and
+  activating the account before the Merge offer each fail the intended tests.
 
 **Client build note — change-sequence:** the `signInWithPassword` call that verifies the current
 sequence must also provide the session `updateUser` runs on. A4 requires a session under 24 hours
