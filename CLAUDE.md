@@ -941,8 +941,9 @@ data migration. One commit per item.
   - Reset password: `{SiteURL}/?token_hash=<hash>&type=recovery`
 - The client reads these on boot and calls `supabase.auth.verifyOtp({ token_hash, type })`. No PKCE,
   no Vercel rewrite.
-- **Templates now use `{{ .RedirectTo }}`** (Tiggs, dashboard; in place for the 2026-10-11 live
-  tests). The confirm template was `{{ .RedirectTo }}/?token_hash={{ .TokenHash }}&type=email`.
+- **Templates now use `{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=email`** (and
+  `type=recovery` for reset), with no `/` before the `?`. Both were saved by Tiggs on 2026-10-11.
+  (The first live run used `{{ .RedirectTo }}/?…`, which produced the `//` links below.)
   GoTrue resolves `RedirectTo` as: explicit `redirect_to` (if allowlisted) → the request's `Referer`
   header (if allowlisted) → Site URL. Evidence and source links are in
   `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`, "Q2 evidence".
@@ -954,16 +955,20 @@ data migration. One commit per item.
   matches `http://localhost:5173/` and rejects the bare `http://localhost:5173`. A rejected
   `redirect_to` is silently replaced by the Referer (`http://localhost:5173/`, with a trailing
   slash), which is how the `//` links happened. The client now sends `${origin}/` (step 2a fix pass).
-- **Recommended template (not yet applied; Tiggs):** `{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=email`
-  (and `type=recovery` for reset), with no `/` before the `?`. A RedirectTo ending in `/` (the
-  client's value, or a Referer) gives `…/?token_hash=`, and a bare Site URL fallback gives
+- **Why there's no `/` before the `?`:** a RedirectTo ending in `/` (the client's value, or a
+  Referer) gives `…/?token_hash=`, and a bare Site URL fallback gives
   `https://sharpin-your-game.vercel.app?token_hash=`, which browsers load as `/?token_hash=`. The
-  current `…}}/?…` form produces `//` whenever RedirectTo ends in `/`. The client now handles `//`
-  anyway, but the link is cleaner without it.
+  old `…}}/?…` form produced `//` whenever RedirectTo ended in `/`. The client also tolerates `//`
+  now (`authUrl.js`).
 - Test-user log: `e16eae92-cf3e-45cd-bf84-95ff64ded354` created and deleted 2026-10-10;
-  `auth.users` back to 2. `5c07f333-e9df-42ca-9cda-e8abbd33aa8a` and
-  `386b2bb5-2c66-45b6-9bd7-184bed786f52` created and deleted 2026-10-11 (2a live tests);
-  `auth.users` back to 2.
+  `auth.users` back to 2. 2026-10-11 (2a live tests and retest):
+  - U1 `5c07f333-e9df-42ca-9cda-e8abbd33aa8a` and U2 `386b2bb5-2c66-45b6-9bd7-184bed786f52`:
+    created and deleted. Auth logs confirm the deletions at 15:11:42Z and 15:11:47Z.
+  - U3 `39787a4d-8c72-4c26-a555-dd323115f7b1` (`+sharpin2a3`): created and deleted for the
+    retest. The deletion is confirmed by the users count.
+  - `auth.users` back to 2.
+- **Audit-log database copy (Authentication → Audit Logs) is OFF.** Auth logs are still
+  available in the log viewer. **Turn the database copy on before the family release (step 5).**
 
 **Step 2 decisions (2026-10-10), from `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`:**
 - Q1: the separator is ASCII `|` (U+007C). `hashSequence` is unchanged; TEST_FIXTURE_KEEP's stored
@@ -984,10 +989,22 @@ data migration. One commit per item.
 - Step 2 is split: **2a "Get in"** (sign-up, confirm link, sign-in, resend, first-sign-in
   Merge/Discard, logout scope) and **2b** (forgot/recovery, change sequence, "Signed in as").
 
-**Step 2a — client "Get in" (branch `auth-v2-step2a`, 2026-10-10): built, unit-tested, local
-commits only. Not pushed; the UI commits need Tiggs's visual sign-off.**
-- **Live tests 2026-10-11 (Tiggs, dev on port 5173, flag on): T1–T11 pass, T12 skipped.**
-  Throwaway users are listed in the test-user log above.
+**Step 2a — client "Get in": shipped 2026-10-11.** Tiggs signed off on code and visuals; master
+was fast-forwarded from `auth-v2-step2a` and pushed. Production runs with
+`VITE_ENABLE_ACCOUNT_SYNC` off, so none of this is reachable there yet.
+- **Live tests 2026-10-11 (Tiggs, dev on port 5173, flag on): T1–T11 pass.** T12 (AC11, the
+  rate-limit message) was skipped; unit tests cover it. Throwaway users are in the test-user log above.
+- **Retest 2026-10-11, after the fix pass and the template change:**
+  - R1–R3: confirmed by Tiggs, no screenshots.
+  - R4/R5: the confirm link opened unedited as
+    `http://localhost:5173/?token_hash=<redacted>&type=email` (one slash); verify and Merge
+    succeeded.
+  - R6, Settings scroll: at 393×852 the panel fits with no scrollbar; on a shorter viewport it
+    scrolls internally down to Logout. Confirmed by Tiggs.
+  - The layout at 393px matches production. An earlier half-width render was stale and cleared on
+    reload; not a code issue.
+- **Dev note:** the LastPass browser extension floods the console with `runtime.lastError` errors.
+  Ignore them; they're not from the app.
 - **Found live, fixed in the fix pass:** confirm emails linked to `http://localhost:5173//?token_hash=…`.
   Opening one gave a blank screen: `authUrl.js` wrote the cleaned path back as a relative `//`
   (protocol-relative) and `replaceState` threw `SecurityError … URL 'http:' cannot be created`
@@ -998,7 +1015,7 @@ commits only. Not pushed; the UI commits need Tiggs's visual sign-off.**
     "Allow-list matching" above).
   - The new tests fail on the pre-fix code with the same SecurityError.
 - Settings panel now scrolls within the viewport (`max-h-[calc(100dvh-5rem)] overflow-y-auto`).
-  Visual change; needs sign-off.
+  Signed off (R6).
 - `authUrl.js` verifies only `type=email` in 2a; `type=recovery` links are stripped but not
   verified, so the forgot-sequence link does nothing until 2b.
 - Mutation-checked: setting the Q3 flag on a no-offer sign-in, dropping the run-once memo, and
