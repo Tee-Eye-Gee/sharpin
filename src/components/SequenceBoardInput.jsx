@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { BOARD_THEMES, DEFAULT_BOARD_THEME } from '../utils/theme'
-import { hashSequence } from '../utils/sequenceHash'
+import { hashSequence, SEQUENCE_SEPARATOR } from '../utils/sequenceHash'
 
 // Anderssen vs. Kieseritzky, "The Immortal Game" (1851), the position after
 // 11...cxb5 -- fixed identically for every attempt (Create Account and
@@ -72,11 +72,11 @@ export default function SequenceBoardInput({ onSequenceComplete, disabled, board
   const submittedRef = useRef(false)
 
   // LaunchOverlay only ever sets `disabled` as a downstream consequence of
-  // this component's own submission (see handleLogin/handleCreateAccount) --
-  // submitting while the request is in flight, then back to false on a
-  // failure that keeps the overlay open (a no-match login, a 409 sequence
-  // collision). A real success instead calls onAuthenticated and the whole
-  // overlay unmounts, so this effect never fires for that path. Without
+  // this component's own submission (see handleSignIn) -- submitting while
+  // the request is in flight, then back to false on a failure that keeps
+  // the overlay open (a rejected sign-in, a rate limit). A real success
+  // instead calls onAuthenticated and the whole overlay unmounts, so this
+  // effect never fires for that path. Without
   // this, a failed attempt would leave the board permanently locked after
   // its 4th move with no way to draw a new sequence -- unlike the
   // placeholder it replaces, which never locked itself.
@@ -96,7 +96,7 @@ export default function SequenceBoardInput({ onSequenceComplete, disabled, board
   const showCorrectionControls = moveCount > 0 && moveCount < SEQUENCE_LENGTH
 
   async function submitSequence(finalMoves) {
-    const hash = await hashSequence(finalMoves.join('|'))
+    const hash = await hashSequence(finalMoves.join(SEQUENCE_SEPARATOR))
     onSequenceComplete(hash)
   }
 

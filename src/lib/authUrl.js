@@ -19,6 +19,15 @@ const VERIFIED_TYPES = new Set(['email'])
 // verification, so a reload can never resubmit a consumed token; the
 // values live only in memory from here on. Other params and the hash
 // fragment are preserved.
+//
+// The cleaned URL is passed to replaceState as an absolute URL, with any
+// run of leading slashes in the path collapsed to one. A link like
+// http://localhost:5173//?token_hash=... (found live 2026-10-11, from an
+// email template appending '/' to a RedirectTo that already ended in '/')
+// has the path '//'; written back as a relative '//?...' that is a
+// protocol-relative URL, and replaceState threw a SecurityError at module
+// load -- a blank screen. replaceState is also guarded: if cleaning the
+// address bar fails for any reason, the token is still consumed.
 function takeUrlToken() {
   if (typeof window === 'undefined') return null
   const url = new URL(window.location.href)
@@ -27,7 +36,12 @@ function takeUrlToken() {
   const type = url.searchParams.get('type')
   url.searchParams.delete('token_hash')
   url.searchParams.delete('type')
-  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+  url.pathname = url.pathname.replace(/^\/{2,}/, '/')
+  try {
+    window.history.replaceState(window.history.state, '', url.href)
+  } catch {
+    // Address bar keeps the params; the token is still verified (once) below.
+  }
   return { tokenHash, type }
 }
 

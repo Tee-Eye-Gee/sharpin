@@ -941,12 +941,28 @@ data migration. One commit per item.
   - Reset password: `{SiteURL}/?token_hash=<hash>&type=recovery`
 - The client reads these on boot and calls `supabase.auth.verifyOtp({ token_hash, type })`. No PKCE,
   no Vercel rewrite.
-- **Planned (Tiggs, dashboard, after step 2a):** switch both templates from `{{ .SiteURL }}` to
-  `{{ .RedirectTo }}`. The client already passes `emailRedirectTo: window.location.origin` on
-  `signUp` and `resend`. GoTrue resolves `RedirectTo` as: explicit `redirect_to` (if allowlisted) →
-  the request's `Referer` header (if allowlisted) → Site URL. Evidence and source links are in
+- **Templates now use `{{ .RedirectTo }}`** (Tiggs, dashboard; in place for the 2026-10-11 live
+  tests). The confirm template was `{{ .RedirectTo }}/?token_hash={{ .TokenHash }}&type=email`.
+  GoTrue resolves `RedirectTo` as: explicit `redirect_to` (if allowlisted) → the request's `Referer`
+  header (if allowlisted) → Site URL. Evidence and source links are in
   `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`, "Q2 evidence".
+- **Allow-list matching (supabase/auth `request.go` `IsRedirectURLValid`, `configuration.go`):** a
+  `redirect_to` whose scheme+hostname+port match the Site URL is accepted outright, path or no
+  path. Anything else must match an allow-list entry, compiled with
+  `glob.MustCompile(uri, '.', '/')` (gobwas/glob): `*` stops at `.` and `/`, while `**` matches
+  anything, including nothing. So `http://localhost:*/**` needs the `/` after the port: it
+  matches `http://localhost:5173/` and rejects the bare `http://localhost:5173`. A rejected
+  `redirect_to` is silently replaced by the Referer (`http://localhost:5173/`, with a trailing
+  slash), which is how the `//` links happened. The client now sends `${origin}/` (step 2a fix pass).
+- **Recommended template (not yet applied; Tiggs):** `{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=email`
+  (and `type=recovery` for reset), with no `/` before the `?`. A RedirectTo ending in `/` (the
+  client's value, or a Referer) gives `…/?token_hash=`, and a bare Site URL fallback gives
+  `https://sharpin-your-game.vercel.app?token_hash=`, which browsers load as `/?token_hash=`. The
+  current `…}}/?…` form produces `//` whenever RedirectTo ends in `/`. The client now handles `//`
+  anyway, but the link is cleaner without it.
 - Test-user log: `e16eae92-cf3e-45cd-bf84-95ff64ded354` created and deleted 2026-10-10;
+  `auth.users` back to 2. `5c07f333-e9df-42ca-9cda-e8abbd33aa8a` and
+  `386b2bb5-2c66-45b6-9bd7-184bed786f52` created and deleted 2026-10-11 (2a live tests);
   `auth.users` back to 2.
 
 **Step 2 decisions (2026-10-10), from `docs/specs/Sharpin_Investigation_AuthV2_Step2.md`:**
@@ -969,7 +985,18 @@ data migration. One commit per item.
   Merge/Discard, logout scope) and **2b** (forgot/recovery, change sequence, "Signed in as").
 
 **Step 2a — client "Get in" (branch `auth-v2-step2a`, 2026-10-10): built, unit-tested, local
-commits only. Not pushed; the UI commit needs Tiggs's visual sign-off. Not live-verified.**
+commits only. Not pushed; the UI commits need Tiggs's visual sign-off.**
+- **Live tests 2026-10-11 (Tiggs, dev on port 5173, flag on): T1–T11 pass, T12 skipped.**
+  Throwaway users are listed in the test-user log above.
+- **Found live, fixed in the fix pass:** confirm emails linked to `http://localhost:5173//?token_hash=…`.
+  Opening one gave a blank screen: `authUrl.js` wrote the cleaned path back as a relative `//`
+  (protocol-relative) and `replaceState` threw `SecurityError … URL 'http:' cannot be created`
+  at module load. The same link with one `/` worked (verify, Merge, Discard). Fixes:
+  - `authUrl.js` collapses leading slashes, passes an absolute same-origin URL, and wraps
+    `replaceState` so it can never block consuming the token.
+  - The client sends `emailRedirectTo: ${origin}/`, which the allow-list glob accepts (see
+    "Allow-list matching" above).
+  - The new tests fail on the pre-fix code with the same SecurityError.
 - `authUrl.js` verifies only `type=email` in 2a; `type=recovery` links are stripped but not
   verified, so the forgot-sequence link does nothing until 2b.
 - Mutation-checked: setting the Q3 flag on a no-offer sign-in, dropping the run-once memo, and

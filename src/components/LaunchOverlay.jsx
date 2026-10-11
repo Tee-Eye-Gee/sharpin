@@ -12,10 +12,14 @@ const VIEWS = { MENU: 'menu', SIGN_IN: 'sign_in', SIGN_UP: 'sign_up', CHECK_EMAI
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 // Where the confirmation link should send the user back to (decision Q2):
-// this same origin, so a dev sign-up's link returns to dev once the email
-// templates use {{ .RedirectTo }}.
+// this same origin's root, so a dev sign-up's link returns to dev once the
+// email templates use {{ .RedirectTo }}. The trailing '/' matters: Supabase
+// matches redirect_to against the allow-list as a glob, and
+// 'http://localhost:*/**' needs the '/' after the port -- a bare origin
+// fails it, and Supabase then silently falls back to the Referer header
+// (found live 2026-10-11; evidence in CLAUDE.md, "Step 2a").
 function emailRedirectTo() {
-  return window.location.origin
+  return `${window.location.origin}/`
 }
 
 /**

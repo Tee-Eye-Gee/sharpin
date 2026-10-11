@@ -140,7 +140,7 @@ describe('LaunchOverlay: sign in', () => {
     expect(mockResend).toHaveBeenCalledWith({
       type: 'signup',
       email: EMAIL,
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: `${window.location.origin}/` },
     })
   })
 
@@ -175,7 +175,7 @@ describe('LaunchOverlay: create account', () => {
     expect(mockSignUp).toHaveBeenCalledWith({
       email: EMAIL,
       password: FIXTURE_HASH,
-      options: { emailRedirectTo: window.location.origin, data: { display_name: 'ChessFan42' } },
+      options: { emailRedirectTo: `${window.location.origin}/`, data: { display_name: 'ChessFan42' } },
     })
     expect(screen.getByText(new RegExp(EMAIL.replace(/[+.]/g, '\\$&')))).toBeTruthy()
     expect(onAuthenticated).not.toHaveBeenCalled()
