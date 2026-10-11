@@ -149,7 +149,11 @@ export default function SettingsPanel({
     <>
       <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
 
-      <div className="fixed top-16 right-4 z-50 w-72 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-surface p-4 shadow-xl">
+      {/* Scrolls inside the viewport when its content is taller: top-16 sits
+          the panel below the header, and the max height leaves the same 1rem
+          gap at the bottom as right-4 does at the side. dvh, not vh, so a
+          mobile browser's toolbars can't cover the bottom of it. */}
+      <div className="fixed top-16 right-4 z-50 w-72 max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-lg border border-border bg-surface p-4 shadow-xl">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-fg">Settings</h2>
           <button

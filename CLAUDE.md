@@ -997,6 +997,8 @@ commits only. Not pushed; the UI commits need Tiggs's visual sign-off.**
   - The client sends `emailRedirectTo: ${origin}/`, which the allow-list glob accepts (see
     "Allow-list matching" above).
   - The new tests fail on the pre-fix code with the same SecurityError.
+- Settings panel now scrolls within the viewport (`max-h-[calc(100dvh-5rem)] overflow-y-auto`).
+  Visual change; needs sign-off.
 - `authUrl.js` verifies only `type=email` in 2a; `type=recovery` links are stripped but not
   verified, so the forgot-sequence link does nothing until 2b.
 - Mutation-checked: setting the Q3 flag on a no-offer sign-in, dropping the run-once memo, and
